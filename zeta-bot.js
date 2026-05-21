@@ -11,7 +11,7 @@ const client = new Client({
 })
 
 const OWNER = "borntoharem"
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY
 
 const history = new Map()
 
@@ -66,17 +66,15 @@ function addHistory(id, role, content) {
   if (h.length > 40) h.splice(0, h.length - 40)
 }
 
-async function callOpenRouter(systemPrompt, historyArr) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+async function callMistral(systemPrompt, historyArr) {
+  const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-      "HTTP-Referer": "https://discord.com",
-      "X-Title": "Zeta Bot"
+      "Authorization": `Bearer ${MISTRAL_API_KEY}`
     },
     body: JSON.stringify({
-      model: "nousresearch/hermes-3-llama-3.1-405b:free",
+      model: "mistral-small-latest",
       max_tokens: 300,
       messages: [
         { role: "system", content: systemPrompt },
@@ -87,7 +85,7 @@ async function callOpenRouter(systemPrompt, historyArr) {
 
   const data = await res.json()
   if (!res.ok) {
-    console.error("OpenRouter error:", JSON.stringify(data))
+    console.error("Mistral error:", JSON.stringify(data))
     return null
   }
   return data.choices?.[0]?.message?.content || null
@@ -98,7 +96,7 @@ async function reply(channelId, msg, user) {
   const prompt = isOwner ? PROMPT_OWNER : PROMPT_OTHER
   addHistory(channelId, "user", `${user}: ${msg}`)
   const h = getHistory(channelId)
-  const text = await callOpenRouter(prompt, h)
+  const text = await callMistral(prompt, h)
   if (!text) return "give me a sec..."
   addHistory(channelId, "assistant", text)
   return text
@@ -129,7 +127,7 @@ async function maybeReactToChisa(msg) {
     const channelId = msg.channel.id + "_chisa"
     addHistory(channelId, "user", `Chisa said: ${msg.content}`)
     const h = getHistory(channelId)
-    const text = await callOpenRouter(PROMPT_OTHER, h)
+    const text = await callMistral(PROMPT_OTHER, h)
     if (text) {
       addHistory(channelId, "assistant", text)
       await msg.channel.send(text)

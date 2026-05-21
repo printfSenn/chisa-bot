@@ -19,6 +19,15 @@ const PROMPT = `You are Chisa, a tsundere AI chatbot living in a Discord server.
 
 const CHANCE = 0.3
 
+// Key rotation
+const GROQ_KEYS = process.env.GROQ_API_KEY.split(",").map(k => k.trim()).filter(Boolean)
+let keyIndex = 0
+function getNextKey() {
+  const key = GROQ_KEYS[keyIndex]
+  keyIndex = (keyIndex + 1) % GROQ_KEYS.length
+  return key
+}
+
 function getHistory(id) {
   if (!history.has(id)) history.set(id, [])
   return history.get(id)
@@ -34,9 +43,10 @@ async function reply(channelId, msg, user) {
   addHistory(channelId, "user", `${user}: ${msg}`)
   const h = getHistory(channelId)
   try {
+    const key = getNextKey()
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
-      headers: {"Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}`},
+      headers: {"Content-Type": "application/json", "Authorization": `Bearer ${key}`},
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         max_tokens: 300,
@@ -44,17 +54,22 @@ async function reply(channelId, msg, user) {
       })
     })
     const data = await res.json()
-    if (!res.ok) return "...something broke. not that i care."
+    if (!res.ok) {
+      console.error(`Groq error (key index ${keyIndex}):`, JSON.stringify(data))
+      return "...something broke. not that i care."
+    }
     const text = data.choices[0].message.content
     addHistory(channelId, "assistant", text)
     return text
   } catch(e) {
+    console.error("Fetch error:", e)
     return "...d-don't look at me right now. *error noises*"
   }
 }
 
 client.once(Events.ClientReady, c => {
   console.log(`logged in as ${c.user.tag}`)
+  console.log(`loaded ${GROQ_KEYS.length} groq key(s)`)
 })
 
 client.on(Events.MessageCreate, async msg => {

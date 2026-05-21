@@ -12,7 +12,7 @@ const client = new Client({
 
 const OWNER = "borntoharem"
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`
 
 const history = new Map()
 
@@ -102,7 +102,7 @@ async function reply(channelId, msg, user) {
   return text
 }
 
-// Random convo strat
+// Random convos statr
 async function sendRandomMessage() {
   try {
     const guilds = client.guilds.cache.values()
@@ -111,6 +111,8 @@ async function sendRandomMessage() {
         c.isTextBased() && c.permissionsFor(guild.members.me)?.has("SendMessages")
       )
       if (channels.size === 0) continue
+
+      
 
 
 
@@ -156,6 +158,12 @@ client.once(Events.ClientReady, c => {
   
 
 
+
+
+
+
+
+
   function scheduleRandom() {
     const delay = (2 + Math.random() * 3) * 60 * 60 * 1000
     setTimeout(async () => {
@@ -168,6 +176,7 @@ client.once(Events.ClientReady, c => {
 
 client.on(Events.MessageCreate, async msg => {
   if (msg.author.bot) {
+    // ReactChisa smtms
     const isChisa = CHISA_NAMES.some(name => msg.author.username.includes(name))
     if (isChisa) await maybeReactToChisa(msg)
     return
@@ -175,6 +184,12 @@ client.on(Events.MessageCreate, async msg => {
 
   const mentioned = msg.mentions.has(client.user)
   const isOwner = msg.author.username.toLowerCase() === OWNER.toLowerCase()
+
+
+
+
+
+
 
   if (!mentioned && !(isOwner && Math.random() < 0.7)) return
 

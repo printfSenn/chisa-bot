@@ -11,8 +11,7 @@ const client = new Client({
 })
 
 const OWNER = "borntoharem"
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY
 
 const history = new Map()
 
@@ -67,28 +66,31 @@ function addHistory(id, role, content) {
   if (h.length > 40) h.splice(0, h.length - 40)
 }
 
-async function callGemini(systemPrompt, historyArr) {
-  const contents = historyArr.map(m => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }]
-  }))
-
-  const res = await fetch(GEMINI_URL, {
+async function callOpenRouter(systemPrompt, historyArr) {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+      "HTTP-Referer": "https://discord.com",
+      "X-Title": "Zeta Bot"
+    },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: systemPrompt }] },
-      contents,
-      generationConfig: { maxOutputTokens: 300, temperature: 0.9 }
+      model: "meta-llama/llama-3.3-70b-instruct:free",
+      max_tokens: 300,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...historyArr.map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))
+      ]
     })
   })
 
   const data = await res.json()
   if (!res.ok) {
-    console.error("Gemini error:", JSON.stringify(data))
+    console.error("OpenRouter error:", JSON.stringify(data))
     return null
   }
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || null
+  return data.choices?.[0]?.message?.content || null
 }
 
 async function reply(channelId, msg, user) {
@@ -96,13 +98,12 @@ async function reply(channelId, msg, user) {
   const prompt = isOwner ? PROMPT_OWNER : PROMPT_OTHER
   addHistory(channelId, "user", `${user}: ${msg}`)
   const h = getHistory(channelId)
-  const text = await callGemini(prompt, h)
+  const text = await callOpenRouter(prompt, h)
   if (!text) return "give me a sec..."
   addHistory(channelId, "assistant", text)
   return text
 }
 
-// Random convos statr
 async function sendRandomMessage() {
   try {
     const guilds = client.guilds.cache.values()
@@ -111,15 +112,6 @@ async function sendRandomMessage() {
         c.isTextBased() && c.permissionsFor(guild.members.me)?.has("SendMessages")
       )
       if (channels.size === 0) continue
-
-      
-
-
-
-
-
-
-
       const channel = channels.random()
       const starter = RANDOM_STARTERS[Math.floor(Math.random() * RANDOM_STARTERS.length)]
       await channel.send(starter)
@@ -130,19 +122,14 @@ async function sendRandomMessage() {
   }
 }
 
-
-
-
-
 async function maybeReactToChisa(msg) {
   if (Math.random() > 0.4) return
   try {
     await msg.channel.sendTyping()
-    const prompt = PROMPT_OTHER
     const channelId = msg.channel.id + "_chisa"
     addHistory(channelId, "user", `Chisa said: ${msg.content}`)
     const h = getHistory(channelId)
-    const text = await callGemini(prompt, h)
+    const text = await callOpenRouter(PROMPT_OTHER, h)
     if (text) {
       addHistory(channelId, "assistant", text)
       await msg.channel.send(text)
@@ -154,15 +141,6 @@ async function maybeReactToChisa(msg) {
 
 client.once(Events.ClientReady, c => {
   console.log(`Zeta logged in as ${c.user.tag}`)
-
-  
-
-
-
-
-
-
-
 
   function scheduleRandom() {
     const delay = (2 + Math.random() * 3) * 60 * 60 * 1000
@@ -176,7 +154,6 @@ client.once(Events.ClientReady, c => {
 
 client.on(Events.MessageCreate, async msg => {
   if (msg.author.bot) {
-    // ReactChisa smtms
     const isChisa = CHISA_NAMES.some(name => msg.author.username.includes(name))
     if (isChisa) await maybeReactToChisa(msg)
     return
@@ -184,12 +161,6 @@ client.on(Events.MessageCreate, async msg => {
 
   const mentioned = msg.mentions.has(client.user)
   const isOwner = msg.author.username.toLowerCase() === OWNER.toLowerCase()
-
-
-
-
-
-
 
   if (!mentioned && !(isOwner && Math.random() < 0.7)) return
 

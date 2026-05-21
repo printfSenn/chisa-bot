@@ -76,7 +76,7 @@ async function callOpenRouter(systemPrompt, historyArr) {
       "X-Title": "Zeta Bot"
     },
     body: JSON.stringify({
-      model: "meta-llama/llama-3.3-70b-instruct:free",
+      model: "google/gemma-3-27b-it:free",
       max_tokens: 300,
       messages: [
         { role: "system", content: systemPrompt },

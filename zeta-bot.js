@@ -225,22 +225,41 @@ function addHistory(id, role, content) {
 }
 
 
-async function callMistral(systemPrompt, historyArr) {
-  const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MISTRAL_API_KEY}` },
-    body: JSON.stringify({
-      model: "mistral-small-latest",
-      max_tokens: 300,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...historyArr.map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))
-      ]
-    })
-  })
-  const data = await res.json()
-  if (!res.ok) { console.error("Mistral error:", JSON.stringify(data)); return null }
-  return data.choices?.[0]?.message?.content || null
+async function callMistral(systemPrompt, historyArr, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MISTRAL_API_KEY}` },
+        body: JSON.stringify({
+          model: "mistral-small-latest",
+          max_tokens: 300,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...historyArr.map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))
+          ]
+        })
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        console.error(`Mistral error (attempt ${attempt + 1}):`, JSON.stringify(data))
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); continue }
+        return null
+      }
+      const content = data.choices?.[0]?.message?.content
+      if (!content) {
+        console.error(`Mistral empty response (attempt ${attempt + 1}):`, JSON.stringify(data))
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); continue }
+        return null
+      }
+      return content
+    } catch (e) {
+      console.error(`Mistral fetch error (attempt ${attempt + 1}):`, e)
+      if (attempt < retries) { await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); continue }
+      return null
+    }
+  }
+  return null
 }
 
 
@@ -258,7 +277,11 @@ async function reply(channelId, msg, user, userId, guildId) {
   addHistory(channelId, "user", `${user}: ${msg}`)
   const h = getHistory(channelId)
   const text = await callMistral(systemPrompt, h)
-  if (!text) return { text: "give me a sec...", emoji: null }
+  if (!text) {
+    console.error("reply(): callMistral returned null for user:", user, "msg:", msg)
+    const fallbacks = ["ugh my brain lagged, say that again?", "sorry i zoned out lol, what?", "wait i didn't catch that, repeat?"]
+    return { text: fallbacks[Math.floor(Math.random() * fallbacks.length)], emoji: null }
+  }
 
   const memoryMatches = text.match(/\[REMEMBER:\s*.+?\]/gi)
   if (memoryMatches) {
@@ -520,16 +543,16 @@ client.on(Events.MessageCreate, async msg => {
     await msg.channel.sendTyping()
     const categories = ["science", "history", "geography", "pop culture", "anime", "gaming", "food", "sports", "technology", "movies", "music", "nature", "mathematics", "literature", "mythology"]
     const randomCategory = categories[Math.floor(Math.random() * categories.length)]
-    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. Make it interesting and not too easy. Format exactly like:
+    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed — not always B. Mix it up. Format exactly like:
 Question: [question]
 A) [option]
 B) [option]
 C) [option]
 D) [option]
-Answer: [letter]`
+Answer: [letter only, e.g. C]`
     const text = await callMistral(triviaPrompt, [{ role: "user", content: `give me a trivia question about ${randomCategory}` }])
     if (!text) return msg.reply("my brain is empty rn, try again")
-    const answerMatch = text.match(/Answer:\s*([A-D])/i)
+    const answerMatch = text.match(/^Answer[:\s*\-]+\**\s*([A-D])\b/im)
     if (answerMatch) {
       const questionMatch = text.match(/Question:\s*(.+)/)
       const questionKey = questionMatch ? questionMatch[1].trim().toLowerCase().slice(0, 60) : text.slice(0, 60)

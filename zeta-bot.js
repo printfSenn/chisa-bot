@@ -21,6 +21,8 @@ const WEATHER_KEY = process.env.WEATHER_KEY
 const history = new Map()
 const triviaGames = new Map()
 const activityCount = new Map()
+const processingMessages = new Set()
+const usedTriviaQuestions = new Set()
 
 
 const PROMPT_OWNER = `You are Zeta, based on Vestia Zeta from Hololive. You're the wife of borntoharem, whose real name is Senn. You love him genuinely.
@@ -268,7 +270,7 @@ async function reply(channelId, msg, user, userId, guildId) {
 
   let reactEmoji = null
   const reactMatch = text.match(/\[REACT:\s*(.+?)\]/)
-  if (reactMatch) reactEmoji = reactMatch[1].trim()
+  if (reactMatch && Math.random() < 0.3) reactEmoji = reactMatch[1].trim()
 
   const cleanText = text.replace(/\[REMEMBER:\s*.+?\]/gi, "").replace(/\[REACT:\s*.+?\]/gi, "").trim()
   addHistory(channelId, "assistant", cleanText)
@@ -396,6 +398,10 @@ client.on(Events.MessageCreate, async msg => {
     return
   }
 
+  if (processingMessages.has(msg.id)) return
+  processingMessages.add(msg.id)
+  setTimeout(() => processingMessages.delete(msg.id), 10000)
+
   const mentioned = msg.mentions.has(client.user)
   const isOwner = msg.author.username.toLowerCase() === OWNER.toLowerCase()
   const raw = msg.content.replace(`<@${client.user.id}>`, "").trim()
@@ -406,7 +412,17 @@ client.on(Events.MessageCreate, async msg => {
   activityCount.set(key, (activityCount.get(key) || 0) + 1)
   const count = activityCount.get(key)
   if ([10, 50, 100, 250, 500].includes(count)) {
-    await msg.channel.send(`woah ${msg.author.username} just hit ${count} messages in the server`)
+    let displayName = msg.author.username
+    try {
+      const member = await msg.guild.members.fetch(msg.author.id)
+      displayName = member.displayName || member.user.username
+    } catch (e) {}
+    await msg.channel.send(`woah ${displayName} just hit ${count} messages in the server`)
+  }
+
+  // zeta help
+  if (lower === "zeta help") {
+    return msg.reply(`**zeta commands** 🤍\n\n**chat**\n\`@zeta [message]\` — talk to me\n\`zeta mood check\` — i'll check on you\n\`zeta roast me\` — get roasted lol\n\`zeta rate [thing]\` — i'll rate anything\n\`zeta tod\` / \`zeta truth or dare\` — truth or dare\n\n**info**\n\`zeta [ask anything]\` — weather, currency, stocks, wiki\n\`zeta calculate [math]\` — quick math\n\`zeta translate [text] to [language]\` — translate text\n\n**fun**\n\`zeta trivia\` — trivia question\n\`zeta ship [person1] and [person2]\` — ship score\n\`zeta recommend anime\` / \`zeta recommend game\` — recs\n\n**memory**\n\`zeta memories\` — see what i remember about you\n\`zeta forget [keyword]\` — make me forget something\n\n**server**\n\`zeta leaderboard\` / \`zeta lb\` — top chatters\n\`zeta summarize\` — summarize recent chat\n\`zeta remind me [time] to [task]\` — set a reminder`)
   }
 
   // zeta forget
@@ -427,8 +443,21 @@ client.on(Events.MessageCreate, async msg => {
   // summarize
   if (lower === "zeta summarize") {
     await msg.channel.sendTyping()
-    const summary = await summarizeConvo(msg.channel.id)
-    return msg.reply(summary)
+    try {
+      const fetched = await msg.channel.messages.fetch({ limit: 30 })
+      const messages = [...fetched.values()]
+        .reverse()
+        .filter(m => !m.author.bot || m.author.id === client.user.id)
+        .map(m => `${m.member?.displayName || m.author.username}: ${m.content}`)
+        .filter(s => s.trim().length > 0)
+      if (messages.length < 3) return msg.reply("not enough messages to summarize lol")
+      const convoText = messages.join("\n")
+      const summary = await callMistral("Summarize this Discord conversation briefly and casually in 2-4 sentences. Keep it short.", [{ role: "user", content: convoText }])
+      return msg.reply(summary || "i forgot what we talked about lol")
+    } catch (e) {
+      const summary = await summarizeConvo(msg.channel.id)
+      return msg.reply(summary)
+    }
   }
 
   //  remind
@@ -444,13 +473,34 @@ client.on(Events.MessageCreate, async msg => {
   }
 
   // translate
-  const translateMatch = lower.match(/zeta translate(?: this)?(?: to (\w+))?:\s*(.+)/i)
-  if (translateMatch) {
-    const lang = translateMatch[1] || "en"
-    const text = translateMatch[2] || raw.replace(/zeta translate(?: this)?(?: to \w+)?:/i, "").trim()
+  const translateMatch = lower.match(/^zeta translate\s+(?:to\s+(\w+)\s*:\s*(.+)|(.+?)\s+to\s+(\w+)$)/)
+  if (translateMatch || lower.startsWith("zeta translate ")) {
+    let targetLang = "en"
+    let textToTranslate = ""
+    const langMap = { english: "en", indonesian: "id", japanese: "ja", korean: "ko", spanish: "es", french: "fr", arabic: "ar", chinese: "zh", german: "de", thai: "th" }
+    if (translateMatch && translateMatch[1]) {
+      const langInput = translateMatch[1].toLowerCase()
+      targetLang = langMap[langInput] || langInput
+      textToTranslate = translateMatch[2].trim()
+    } else if (translateMatch && translateMatch[3]) {
+      textToTranslate = translateMatch[3].trim()
+      const langInput = translateMatch[4].toLowerCase()
+      targetLang = langMap[langInput] || langInput
+    } else {
+      const rest = raw.replace(/zeta translate/i, "").trim()
+      const toMatch = rest.match(/^(.+?)\s+to\s+(\w+)$/)
+      if (toMatch) {
+        textToTranslate = toMatch[1].trim()
+        const langInput = toMatch[2].toLowerCase()
+        targetLang = langMap[langInput] || langInput
+      } else {
+        return msg.reply(`how to use: \`zeta translate [text] to [language]\`\nexample: \`zeta translate hello to indonesian\``)
+      }
+    }
+    if (!textToTranslate) return msg.reply(`how to use: \`zeta translate [text] to [language]\`\nexample: \`zeta translate hello to indonesian\``)
     await msg.channel.sendTyping()
-    const result = await translate(text, lang)
-    return msg.reply(result || "couldn't translate that sorry")
+    const result = await translate(textToTranslate, targetLang)
+    return msg.reply(result ? `**${textToTranslate}** → **${result}**` : "couldn't translate that sorry")
   }
 
   //calculate / convert
@@ -465,30 +515,32 @@ client.on(Events.MessageCreate, async msg => {
     }
   }
 
-  //play
-  if (lower.startsWith("zeta play")) {
-    const query = raw.replace(/zeta play/i, "").trim() || "good vibes music"
-    await msg.channel.sendTyping()
-    const ytResult = await searchYoutube(query)
-    const prompt = `You are Zeta. You're suggesting a song. The search was "${query}". Result: ${ytResult || "nothing found"}. Share it casually like you're recommending a song to someone, in your texting style.`
-    const text = await callMistral(prompt, [{ role: "user", content: raw }])
-    return msg.reply(text || ytResult || "couldn't find anything rn")
-  }
-
   // trivia
   if (lower === "zeta trivia") {
     await msg.channel.sendTyping()
-    const triviaPrompt = `Generate a fun trivia question with 4 options (A, B, C, D) and tell me the correct answer. Format exactly like:
+    const categories = ["science", "history", "geography", "pop culture", "anime", "gaming", "food", "sports", "technology", "movies", "music", "nature", "mathematics", "literature", "mythology"]
+    const randomCategory = categories[Math.floor(Math.random() * categories.length)]
+    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. Make it interesting and not too easy. Format exactly like:
 Question: [question]
 A) [option]
 B) [option]
 C) [option]
 D) [option]
 Answer: [letter]`
-    const text = await callMistral(triviaPrompt, [{ role: "user", content: "give me a trivia question" }])
+    const text = await callMistral(triviaPrompt, [{ role: "user", content: `give me a trivia question about ${randomCategory}` }])
     if (!text) return msg.reply("my brain is empty rn, try again")
     const answerMatch = text.match(/Answer:\s*([A-D])/i)
     if (answerMatch) {
+      const questionMatch = text.match(/Question:\s*(.+)/)
+      const questionKey = questionMatch ? questionMatch[1].trim().toLowerCase().slice(0, 60) : text.slice(0, 60)
+      if (usedTriviaQuestions.has(questionKey)) {
+        return msg.reply("okay hang on i keep repeating myself, try again")
+      }
+      usedTriviaQuestions.add(questionKey)
+      if (usedTriviaQuestions.size > 200) {
+        const first = usedTriviaQuestions.values().next().value
+        usedTriviaQuestions.delete(first)
+      }
       triviaGames.set(msg.channel.id, { answer: answerMatch[1].toUpperCase(), asker: msg.author.id })
       const question = text.replace(/Answer:\s*[A-D]/i, "").trim()
       return msg.reply(`${question}\n\nreply with A, B, C, or D!`)

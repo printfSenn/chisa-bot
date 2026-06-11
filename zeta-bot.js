@@ -238,6 +238,22 @@ function addHistory(id, role, content) {
   if (h.length > 40) h.splice(0, h.length - 40)
 }
 
+function formatAfkDuration(since) {
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - since) / 1000))
+  if (totalSeconds < 60) return totalSeconds <= 1 ? "1 second" : `${totalSeconds} seconds`
+
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const parts = []
+
+  if (days) parts.push(`${days} day${days === 1 ? "" : "s"}`)
+  if (hours) parts.push(`${hours} hour${hours === 1 ? "" : "s"}`)
+  if (minutes || parts.length === 0) parts.push(`${minutes} minute${minutes === 1 ? "" : "s"}`)
+
+  return parts.slice(0, 2).join(" and ")
+}
+
 
 async function callMistral(systemPrompt, historyArr, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -475,6 +491,30 @@ client.on(Events.MessageCreate, async msg => {
     return
   }
 
+  // afk mention detection — runs before any lock or early return
+  if (afkUsers.size > 0) {
+    const mentionedUserIds = new Set([
+      ...msg.mentions.users.keys(),
+      ...[...msg.content.matchAll(/<@!?(\d+)>/g)].map(m => m[1])
+    ])
+    for (const [userId, afkData] of afkUsers.entries()) {
+      if (mentionedUserIds.has(userId) && userId !== msg.author.id) {
+        let afkDisplayName = userId
+        try { const m = await msg.guild?.members.fetch(userId); if (m) afkDisplayName = m.displayName || m.user.username } catch (e) {}
+        const timeAway = formatAfkDuration(afkData.since)
+        console.log(`AFK notify: ${afkDisplayName} was tagged while AFK by ${msg.author.username}`)
+        const fallbackAfkMsg = `psst, **${afkDisplayName}** is AFK: *${afkData.reason}* for **${timeAway}**.`
+        try {
+          const replyText = fallbackAfkMsg
+          try { await msg.reply(replyText) } catch (_) { await msg.channel.send(replyText) }
+        } catch (e) {
+          console.error("AFK notify error:", e)
+          try { await msg.reply(fallbackAfkMsg) } catch (_) { try { await msg.channel.send(fallbackAfkMsg) } catch (_2) {} }
+        }
+      }
+    }
+  }
+
   if (processingMessages.has(msg.id)) return
   processingMessages.add(msg.id)
   setTimeout(() => processingMessages.delete(msg.id), 30000)
@@ -506,9 +546,8 @@ client.on(Events.MessageCreate, async msg => {
   if (afkUsers.has(msg.author.id) && !lower.startsWith("zeta afk")) {
     const afkData = afkUsers.get(msg.author.id)
     afkUsers.delete(msg.author.id)
-    const welcomePrompt = `You are Zeta. ${msgDisplayName} just came back after being AFK (reason: "${afkData.reason}"). Welcome them back casually in one short sentence.`
-    const welcomeText = await callMistral(welcomePrompt, [{ role: "user", content: "user returned from afk" }])
-    await msg.channel.send(welcomeText || `welcome back ${msgDisplayName}!`)
+    const afkDuration = formatAfkDuration(afkData.since)
+    await msg.channel.send(`${msgDisplayName} is back from AFK: *${afkData.reason}* for **${afkDuration}**.`)
   }
 
   // track activity
@@ -522,6 +561,15 @@ client.on(Events.MessageCreate, async msg => {
   // zeta help
   if (lower === "zeta help") {
     return msg.reply(`**zeta commands** 🤍\n\n**chat**\n\`@zeta [message]\` — talk to me\n\`zeta mood check\` — i'll check on you\n\`zeta roast me\` — get roasted lol\n\`zeta rate [thing]\` — i'll rate anything\n\`zeta tod\` / \`zeta truth or dare\` — truth or dare\n\n**info**\n\`zeta [ask anything]\` — weather, currency, stocks, wiki\n\`zeta calculate [math]\` — quick math\n\`zeta translate [text] to [language]\` — translate text\n\n**fun**\n\`zeta trivia\` — trivia question\n\`zeta ship [person1] and [person2]\` — ship score\n\`zeta recommend anime\` / \`zeta recommend game\` — recs\n\n**memory**\n\`zeta memories\` — see what i remember about you\n\`zeta forget [keyword]\` — make me forget something\n\n**server**\n\`zeta leaderboard\` / \`zeta lb\` — top chatters\n\`zeta summarize\` — summarize recent chat\n\`zeta remind me [time] to [task]\` — set a reminder`)
+  }
+
+  // afk command
+  if (lower.startsWith("zeta afk")) {
+    const reason = raw.replace(/^zeta\s+afk\s*/i, "").trim() || "no reason given"
+    afkUsers.set(msg.author.id, { reason, since: Date.now() })
+    const afkPrompt = `You are Zeta. ${msgDisplayName} is going AFK with reason: "${reason}". Announce it casually to the server in one short sentence in your texting style.`
+    const text = await callMistral(afkPrompt, [{ role: "user", content: "going afk" }])
+    return msg.reply(text || `${msgDisplayName} is now AFK. Reason: ${reason}`)
   }
 
   // zeta forget
@@ -727,7 +775,7 @@ Answer: [letter only, e.g. C]`
     const guildCounts = []
     for (const [key, count] of activityCount.entries()) {
       if (key.startsWith(msg.guild?.id)) {
-        const userId = key.split("_")[1]
+        const userId = key.spli("_")[1]
         try {
           const member = await msg.guild.members.fetch(userId)
           guildCounts.push({ name: member.displayName || member.user.username, count })
@@ -767,9 +815,8 @@ client.on(Events.InteractionCreate, async interaction => {
   if (afkUsers.has(user.id) && commandName !== "afk") {
     const afkData = afkUsers.get(user.id)
     afkUsers.delete(user.id)
-    const welcomePrompt = `You are Zeta. ${displayName} just came back after being AFK (reason: "${afkData.reason}"). Welcome them back casually in one short sentence.`
-    const welcomeText = await callMistral(welcomePrompt, [{ role: "user", content: "user returned from afk" }])
-    try { await channel.send(welcomeText || `welcome back ${displayName}!`) } catch (e) {}
+    const afkDuration = formatAfkDuration(afkData.since)
+    try { await channel.send(`${displayName} is back from AFK: *${afkData.reason}* for **${afkDuration}**.`) } catch (e) {}
   }
 
   if (commandName === "help") {

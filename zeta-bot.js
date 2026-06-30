@@ -1,4 +1,7 @@
 require('dotenv').config()
+const fs = require("fs")
+const path = require("path")
+const crypto = require("crypto")
 const { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder } = require("discord.js")
 
 const client = new Client({
@@ -24,6 +27,23 @@ const activityCount = new Map()
 const processingMessages = new Set()
 const usedTriviaQuestions = new Set()
 const afkUsers = new Map()
+const gamePlayers = new Map()
+const GAME_SAVE_FILE = path.join(__dirname, "zeta-game.json")
+const GAME_SAVE_SECRET = process.env.GAME_SAVE_SECRET || process.env.DISCORD_TOKEN_ZETA || ""
+const GAME_MAX_COINS = 1_000_000_000
+const GAME_MAX_LEVEL = 1000
+const GAME_MAX_TRANSFER = 100_000
+const GAME_ITEMS = {
+  potion: { name: "Potion", price: 150, description: "softens your next bad adventure" },
+  charm: { name: "Lucky Charm", price: 500, description: "tiny luck boost for hunts and adventures" }
+}
+const GAME_COOLDOWNS = {
+  daily: 24 * 60 * 60 * 1000,
+  work: 30 * 60 * 1000,
+  hunt: 10 * 60 * 1000,
+  adventure: 60 * 60 * 1000
+}
+
 const ownerHourCounts = new Array(24).fill(0)
 let lastOwnerHourTeased = -1
 
@@ -55,7 +75,309 @@ const PROMPT_OTHER = `You are Zeta, based on Vestia Zeta from Hololive. Friendly
 
 const RANDOM_STARTER_PROMPT = `You are Zeta, wife of Senn. You randomly felt like texting him. One short spontaneous message. Very short, casual, real texting vibes. No asterisks, no em dashes.`
 const CHISA_NAMES = ["Tsundere Chisa", "chisa", "Chisa"]
+const VIBE_LINES = [
+  "soft chaos but functional",
+  "dangerously sleepy",
+  "main character energy",
+  "needs water and better decisions",
+  "surprisingly powerful today",
+  "tiny crisis, huge style",
+  "zeta-approved menace",
+  "emotionally loading screen"
+]
+const HUG_LINES = [
+  "gentle zeta hug delivered",
+  "emergency comfort package sent",
+  "hug deployed. no refunds",
+  "small hug, suspiciously effective",
+  "zeta wraps you in warm nonsense"
+]
 
+function randomItem(items) {
+  return items[Math.floor(Math.random() * items.length)]
+}
+
+function rollDice(input = "d6") {
+  const raw = String(input || "d6").trim().toLowerCase()
+  const match = raw.match(/^(?:(\d{1,2})d)?(\d{1,4})$/)
+  if (!match) return null
+  const count = Math.min(parseInt(match[1] || "1", 10), 20)
+  const sides = parseInt(match[2], 10)
+  if (!Number.isInteger(sides) || sides < 2 || sides > 1000) return null
+  const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1)
+  const total = rolls.reduce((sum, n) => sum + n, 0)
+  return { count, sides, rolls, total }
+}
+
+function parseChoices(text) {
+  return text.split(/[|,]/).map(choice => choice.trim()).filter(Boolean).slice(0, 20)
+}
+
+function vibeFor(name) {
+  const score = Math.floor(Math.random() * 101)
+  return `${name} vibe check: **${score}%** ${randomItem(VIBE_LINES)}`
+}
+
+
+
+function defaultPlayer(userId, username = "unknown") {
+  return {
+    id: userId,
+    username,
+    coins: 100,
+    xp: 0,
+    level: 1,
+    hunts: 0,
+    adventures: 0,
+    wins: 0,
+    inventory: { potion: 0, charm: 0 },
+    cooldowns: { daily: 0, work: 0, hunt: 0, adventure: 0 }
+  }
+}
+
+function canonicalGameData(data) {
+  return JSON.stringify({ players: data.players || [] })
+}
+
+function signGameData(data) {
+  if (!GAME_SAVE_SECRET) return null
+  return crypto.createHmac("sha256", GAME_SAVE_SECRET).update(canonicalGameData(data)).digest("hex")
+}
+
+function verifyGameData(data) {
+  if (!GAME_SAVE_SECRET) {
+    console.warn("GAME_SAVE_SECRET is not set. Game save tamper protection is disabled.")
+    return true
+  }
+  if (!data.signature) return false
+  const expected = signGameData(data)
+  const actual = String(data.signature)
+  if (expected.length !== actual.length) return false
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual))
+}
+
+function cleanGameNumber(value, min, max, fallback = min) {
+  const n = Math.floor(Number(value))
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, n))
+}
+
+function xpNeeded(level) {
+  return level * 120
+}
+
+function sanitizeGamePlayer(raw) {
+  const base = defaultPlayer(String(raw?.id || "unknown"), String(raw?.username || "unknown").slice(0, 64))
+  const player = { ...base, ...(raw || {}) }
+  player.id = String(player.id)
+  player.username = String(player.username || "unknown").slice(0, 64)
+  player.coins = cleanGameNumber(player.coins, 0, GAME_MAX_COINS, base.coins)
+  player.xp = cleanGameNumber(player.xp, 0, xpNeeded(GAME_MAX_LEVEL), 0)
+  player.level = cleanGameNumber(player.level, 1, GAME_MAX_LEVEL, 1)
+  player.hunts = cleanGameNumber(player.hunts, 0, 1_000_000, 0)
+  player.adventures = cleanGameNumber(player.adventures, 0, 1_000_000, 0)
+  player.wins = cleanGameNumber(player.wins, 0, 1_000_000, 0)
+  player.inventory = {
+    potion: cleanGameNumber(player.inventory?.potion, 0, 999, 0),
+    charm: cleanGameNumber(player.inventory?.charm, 0, 999, 0)
+  }
+  const maxNow = Date.now() + Math.max(...Object.values(GAME_COOLDOWNS))
+  player.cooldowns = {
+    daily: cleanGameNumber(player.cooldowns?.daily, 0, maxNow, 0),
+    work: cleanGameNumber(player.cooldowns?.work, 0, maxNow, 0),
+    hunt: cleanGameNumber(player.cooldowns?.hunt, 0, maxNow, 0),
+    adventure: cleanGameNumber(player.cooldowns?.adventure, 0, maxNow, 0)
+  }
+  return player
+}
+
+function loadGameData() {
+  try {
+    if (!fs.existsSync(GAME_SAVE_FILE)) return
+    const data = JSON.parse(fs.readFileSync(GAME_SAVE_FILE, "utf8"))
+    if (!verifyGameData(data)) {
+      console.error("Game save signature is invalid or missing. Rejecting zeta-game.json to protect economy data.")
+      try {
+        const rejectedFile = `${GAME_SAVE_FILE}.rejected-${Date.now()}`
+        fs.renameSync(GAME_SAVE_FILE, rejectedFile)
+        console.error(`Rejected game save moved to ${rejectedFile}`)
+      } catch (moveError) { console.error("Could not move rejected game save:", moveError) }
+      return
+    }
+    for (const player of data.players || []) {
+      const clean = sanitizeGamePlayer(player)
+      if (clean.id !== "unknown") gamePlayers.set(clean.id, clean)
+    }
+  } catch (e) { console.error("Game data load error:", e) }
+}
+
+function saveGameData() {
+  try {
+    const players = [...gamePlayers.values()].map(sanitizeGamePlayer).sort((a, b) => a.id.localeCompare(b.id))
+    const data = { version: 2, players }
+    data.signature = signGameData(data)
+    const tmpFile = `${GAME_SAVE_FILE}.tmp`
+    fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2))
+    fs.renameSync(tmpFile, GAME_SAVE_FILE)
+  } catch (e) { console.error("Game data save error:", e) }
+}
+
+function getGamePlayer(user) {
+  const userId = typeof user === "string" ? user : user.id
+  const username = typeof user === "string" ? "unknown" : user.username
+  if (!gamePlayers.has(userId)) gamePlayers.set(userId, defaultPlayer(userId, username))
+  const player = sanitizeGamePlayer(gamePlayers.get(userId))
+  if (username && username !== "unknown") player.username = username
+  gamePlayers.set(userId, player)
+  return player
+}
+
+function addGameXp(player, amount) {
+  player.xp = cleanGameNumber(player.xp + cleanGameNumber(amount, 0, 500, 0), 0, xpNeeded(GAME_MAX_LEVEL), 0)
+  let leveled = 0
+  while (player.level < GAME_MAX_LEVEL && player.xp >= xpNeeded(player.level)) {
+    player.xp -= xpNeeded(player.level)
+    player.level++
+    leveled++
+  }
+  return leveled
+}
+
+function addGameReward(player, coins, xp, maxCoins, maxXp) {
+  const safeCoins = cleanGameNumber(coins, 0, maxCoins, 0)
+  const safeXp = cleanGameNumber(xp, 0, maxXp, 0)
+  player.coins = cleanGameNumber(player.coins + safeCoins, 0, GAME_MAX_COINS, 0)
+  const leveled = addGameXp(player, safeXp)
+  return { coins: safeCoins, xp: safeXp, leveled }
+}
+
+function cooldownText(ms) {
+  if (ms <= 0) return "ready"
+  const totalSeconds = Math.ceil(ms / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours) return `${hours}h ${minutes}m`
+  if (minutes) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
+}
+
+function checkGameCooldown(player, action) {
+  const remaining = (player.cooldowns[action] || 0) - Date.now()
+  return remaining > 0 ? cooldownText(remaining) : null
+}
+
+function setGameCooldown(player, action) {
+  player.cooldowns[action] = Date.now() + GAME_COOLDOWNS[action]
+}
+
+function gameRewardLine(player, coins, xp, leveled = 0) {
+  const levelText = leveled ? `\nlevel up! now level **${player.level}**` : ""
+  return `+**${coins}** zeta coins, +**${xp}** XP${levelText}`
+}
+
+function gameProfile(user, displayName) {
+  const player = getGamePlayer(user)
+  const inv = Object.entries(player.inventory).filter(([, count]) => count > 0).map(([item, count]) => `${GAME_ITEMS[item]?.name || item} x${count}`).join(", ") || "empty"
+  return `**${displayName}**\ncoins: **${player.coins}**\nlevel: **${player.level}** (${player.xp}/${xpNeeded(player.level)} XP)\nhunts: **${player.hunts}** | adventures: **${player.adventures}** | wins: **${player.wins}**\ninventory: ${inv}`
+}
+
+function gameLeaderboard() {
+  const top = [...gamePlayers.values()].sort((a, b) => (b.coins - a.coins) || (b.level - a.level) || (b.xp - a.xp)).slice(0, 10)
+  if (!top.length) return "no adventurers yet. tragic honestly"
+  return top.map((p, i) => `${i + 1}. **${p.username || "unknown"}** — ${p.coins} coins, lvl ${p.level}`).join("\n")
+}
+
+function shopText() {
+  return Object.entries(GAME_ITEMS).map(([id, item]) => `**${id}** — ${item.price} coins: ${item.description}`).join("\n")
+}
+
+function claimDailyReward(player) {
+  const cd = checkGameCooldown(player, "daily")
+  if (cd) return `daily already claimed. come back in **${cd}**`
+  const coins = 750 + Math.floor(Math.random() * 251)
+  const xp = 80
+  const reward = addGameReward(player, coins, xp, 1000, 80)
+  setGameCooldown(player, "daily")
+  saveGameData()
+  return `daily claimed. ${gameRewardLine(player, reward.coins, reward.xp, reward.leveled)}`
+}
+
+function doGameWork(player) {
+  const cd = checkGameCooldown(player, "work")
+  if (cd) return `you already worked. rest for **${cd}**`
+  const jobs = ["sorted Zeta files", "guarded the secret archive", "sold suspiciously cute snacks", "debugged a cursed toaster", "delivered intel with style"]
+  const coins = 120 + Math.floor(Math.random() * 181)
+  const xp = 25 + Math.floor(Math.random() * 26)
+  const reward = addGameReward(player, coins, xp, 300, 50)
+  setGameCooldown(player, "work")
+  saveGameData()
+  return `you ${randomItem(jobs)}. ${gameRewardLine(player, reward.coins, reward.xp, reward.leveled)}`
+}
+
+function doGameHunt(player) {
+  const cd = checkGameCooldown(player, "hunt")
+  if (cd) return `hunt cooldown. wait **${cd}**`
+  const monsters = ["slime", "archive mimic", "tiny dragon", "shadow spreadsheet", "sleep paralysis deadline"]
+  const charmBonus = player.inventory.charm > 0 ? 0.08 : 0
+  const success = Math.random() < 0.72 + charmBonus
+  player.hunts++
+  setGameCooldown(player, "hunt")
+  if (!success) {
+    const xp = 12
+    const leveled = addGameXp(player, cleanGameNumber(xp, 0, 12, 0))
+    saveGameData()
+    return `you hunted a ${randomItem(monsters)} and it got away. +**${xp}** XP${leveled ? `\nlevel up! now level **${player.level}**` : ""}`
+  }
+  const coins = 80 + Math.floor(Math.random() * 171)
+  const xp = 35 + Math.floor(Math.random() * 36)
+  const reward = addGameReward(player, coins, xp, 250, 70)
+  player.wins = cleanGameNumber(player.wins + 1, 0, 1_000_000, 0)
+  saveGameData()
+  return `you defeated a ${randomItem(monsters)}. ${gameRewardLine(player, reward.coins, reward.xp, reward.leveled)}`
+}
+
+function doGameAdventure(player) {
+  const cd = checkGameCooldown(player, "adventure")
+  if (cd) return `adventure cooldown. wait **${cd}**`
+  const places = ["Moonlit Archive", "Neon Dungeon", "Lost Snack Kingdom", "Abyssal Wi-Fi Tower", "Crystal Debug Cave"]
+  const charmBonus = player.inventory.charm > 0 ? 0.07 : 0
+  const success = Math.random() < 0.58 + charmBonus
+  player.adventures++
+  setGameCooldown(player, "adventure")
+  if (!success) {
+    let loss = Math.min(player.coins, 100 + Math.floor(Math.random() * 201))
+    let saved = false
+    if (player.inventory.potion > 0) {
+      player.inventory.potion--
+      loss = Math.floor(loss / 2)
+      saved = true
+    }
+    player.coins = cleanGameNumber(player.coins - loss, 0, GAME_MAX_COINS, 0)
+    const xp = 45
+    const leveled = addGameXp(player, cleanGameNumber(xp, 0, 45, 0))
+    saveGameData()
+    return `the ${randomItem(places)} humbled you. lost **${loss}** coins, +**${xp}** XP${saved ? "\na potion softened the disaster" : ""}${leveled ? `\nlevel up! now level **${player.level}**` : ""}`
+  }
+  const coins = 350 + Math.floor(Math.random() * 651)
+  const xp = 100 + Math.floor(Math.random() * 101)
+  const reward = addGameReward(player, coins, xp, 1000, 200)
+  player.wins = cleanGameNumber(player.wins + 1, 0, 1_000_000, 0)
+  saveGameData()
+  return `you cleared the ${randomItem(places)}. ${gameRewardLine(player, reward.coins, reward.xp, reward.leveled)}`
+}
+
+function buyGameItem(player, itemId) {
+  const item = GAME_ITEMS[itemId]
+  if (!item) return `unknown item. try: ${Object.keys(GAME_ITEMS).join(", ")}`
+  if (player.coins < item.price) return `you need **${item.price}** coins for ${item.name}, but you only have **${player.coins}**`
+  player.coins = cleanGameNumber(player.coins - item.price, 0, GAME_MAX_COINS, 0)
+  player.inventory[itemId] = cleanGameNumber((player.inventory[itemId] || 0) + 1, 0, 999, 0)
+  saveGameData()
+  return `bought **${item.name}** for **${item.price}** coins`
+}
+
+loadGameData()
 
 async function saveMemory(userId, guildId, content) {
   try {
@@ -403,6 +725,22 @@ client.once(Events.ClientReady, async c => {
     new SlashCommandBuilder().setName("quote").setDescription("save a funny quote from the chat").addStringOption(o => o.setName("text").setDescription("the quote").setRequired(true)).addStringOption(o => o.setName("author").setDescription("who said it").setRequired(false)),
     new SlashCommandBuilder().setName("quotes").setDescription("see saved quotes from this server"),
     new SlashCommandBuilder().setName("afk").setDescription("set yourself as afk").addStringOption(o => o.setName("reason").setDescription("why you're afk").setRequired(false)),
+    new SlashCommandBuilder().setName("coinflip").setDescription("flip a coin with zeta"),
+    new SlashCommandBuilder().setName("roll").setDescription("roll dice").addStringOption(o => o.setName("dice").setDescription("dice like d20 or 2d6").setRequired(false)),
+    new SlashCommandBuilder().setName("choose").setDescription("make zeta choose from options").addStringOption(o => o.setName("options").setDescription("separate choices with commas or |").setRequired(true)),
+    new SlashCommandBuilder().setName("hug").setDescription("send someone a zeta hug").addUserOption(o => o.setName("user").setDescription("who to hug").setRequired(false)),
+    new SlashCommandBuilder().setName("vibecheck").setDescription("zeta checks someone's vibe").addUserOption(o => o.setName("user").setDescription("who to vibe check").setRequired(false)),
+    new SlashCommandBuilder().setName("avatar").setDescription("show a user avatar").addUserOption(o => o.setName("user").setDescription("whose avatar").setRequired(false)),
+    new SlashCommandBuilder().setName("serverinfo").setDescription("quick server info from zeta"),
+    new SlashCommandBuilder().setName("balance").setDescription("see your global zeta coins and RPG stats").addUserOption(o => o.setName("user").setDescription("whose profile").setRequired(false)),
+    new SlashCommandBuilder().setName("daily").setDescription("claim daily zeta coins"),
+    new SlashCommandBuilder().setName("work").setDescription("work a silly job for zeta coins"),
+    new SlashCommandBuilder().setName("hunt").setDescription("hunt monsters for coins and XP"),
+    new SlashCommandBuilder().setName("adventure").setDescription("go on a risky RPG adventure"),
+    new SlashCommandBuilder().setName("shop").setDescription("see the zeta RPG shop"),
+    new SlashCommandBuilder().setName("buy").setDescription("buy an RPG item").addStringOption(o => o.setName("item").setDescription("item id").setRequired(true).addChoices({ name: "Potion", value: "potion" }, { name: "Lucky Charm", value: "charm" })),
+    new SlashCommandBuilder().setName("givecoins").setDescription("give zeta coins to another user").addUserOption(o => o.setName("user").setDescription("who gets coins").setRequired(true)).addIntegerOption(o => o.setName("amount").setDescription("how many coins").setRequired(true)),
+    new SlashCommandBuilder().setName("gamelb").setDescription("global zeta game leaderboard"),
     new SlashCommandBuilder().setName("diary").setDescription("zeta writes a dramatic diary entry about the server today"),
   ].map(c => c.toJSON())
 
@@ -560,7 +898,51 @@ client.on(Events.MessageCreate, async msg => {
 
   // zeta help
   if (lower === "zeta help") {
-    return msg.reply(`**zeta commands** 🤍\n\n**chat**\n\`@zeta [message]\` — talk to me\n\`zeta mood check\` — i'll check on you\n\`zeta roast me\` — get roasted lol\n\`zeta rate [thing]\` — i'll rate anything\n\`zeta tod\` / \`zeta truth or dare\` — truth or dare\n\n**info**\n\`zeta [ask anything]\` — weather, currency, stocks, wiki\n\`zeta calculate [math]\` — quick math\n\`zeta translate [text] to [language]\` — translate text\n\n**fun**\n\`zeta trivia\` — trivia question\n\`zeta ship [person1] and [person2]\` — ship score\n\`zeta recommend anime\` / \`zeta recommend game\` — recs\n\n**memory**\n\`zeta memories\` — see what i remember about you\n\`zeta forget [keyword]\` — make me forget something\n\n**server**\n\`zeta leaderboard\` / \`zeta lb\` — top chatters\n\`zeta summarize\` — summarize recent chat\n\`zeta remind me [time] to [task]\` — set a reminder`)
+return msg.reply(`**zeta commands** 🤍
+
+**chat**
+\`@zeta [message]\` — talk to me
+\`zeta mood check\` — i'll check on you
+\`zeta roast me\` — get roasted lol
+\`zeta rate [thing]\` — i'll rate anything
+\`zeta tod\` / \`zeta truth or dare\` — truth or dare
+
+**info**
+\`zeta [ask anything]\` — weather, currency, stocks, wiki
+\`zeta calculate [math]\` — quick math
+\`zeta translate [text] to [language]\` — translate text
+\`zeta avatar [@user]\` — show avatar
+\`zeta server info\` — quick server stats
+
+**fun**
+\`zeta trivia\` — trivia question
+\`zeta ship [person1] and [person2]\` — ship score
+\`zeta choose a, b, c\` — make me choose
+\`zeta roll d20\` — roll dice
+\`zeta coinflip\` — flip a coin
+\`zeta hug [@user]\` — send a hug
+\`zeta vibe check [@user]\` — check vibes
+\`zeta recommend anime\` / \`zeta recommend game\` — recs
+
+**memory**
+\`zeta memories\` — see what i remember about you
+\`zeta forget [keyword]\` — make me forget something
+
+**game**
+\`zeta balance\` / \`zeta profile\` — coins, level, inventory
+\`zeta daily\` — daily global coins
+\`zeta work\` — earn coins every 30 min
+\`zeta hunt\` — hunt monsters every 10 min
+\`zeta adventure\` — risky RPG run every hour
+\`zeta shop\` / \`zeta buy [item]\` — buy items
+\`zeta give @user [amount]\` — send coins
+\`zeta gamelb\` — global game leaderboard
+
+**server**
+\`zeta afk [reason]\` — set yourself afk
+\`zeta leaderboard\` / \`zeta lb\` — top chatters
+\`zeta summarize\` — summarize recent chat
+\`zeta remind me [time] to [task]\` — set a reminder`)
   }
 
   // afk command
@@ -759,6 +1141,104 @@ Answer: [letter only, e.g. C]`
     return msg.reply(text || "hey how are you doing today babe")
   }
 
+  // global RPG economy commands
+  if (/^zeta\s+(?:balance|bal|profile)\b/.test(lower)) {
+    const target = msg.mentions.users.first() || msg.author
+    const targetMember = msg.guild?.members.cache.get(target.id)
+    return msg.reply(gameProfile(target, targetMember?.displayName || target.username))
+  }
+
+  if (lower === "zeta daily") {
+    const player = getGamePlayer(msg.author)
+    return msg.reply(claimDailyReward(player))
+  }
+
+  if (lower === "zeta work") {
+    const player = getGamePlayer(msg.author)
+    return msg.reply(doGameWork(player))
+  }
+
+  if (lower === "zeta hunt") {
+    const player = getGamePlayer(msg.author)
+    return msg.reply(doGameHunt(player))
+  }
+
+  if (lower === "zeta adventure" || lower === "zeta adv") {
+    const player = getGamePlayer(msg.author)
+    return msg.reply(doGameAdventure(player))
+  }
+
+  if (lower === "zeta shop") {
+    return msg.reply(`**zeta shop**\n${shopText()}`)
+  }
+
+  if (lower.startsWith("zeta buy ")) {
+    const itemId = raw.replace(/^zeta\s+buy\s+/i, "").trim().toLowerCase()
+    const player = getGamePlayer(msg.author)
+    return msg.reply(buyGameItem(player, itemId))
+  }
+
+  const giveMatch = raw.match(/^zeta\s+(?:give|pay)\s+<@!?(\d+)>\s+(\d+)$/i)
+  if (giveMatch) {
+    const target = msg.mentions.users.get(giveMatch[1])
+    const amount = cleanGameNumber(giveMatch[2], 1, GAME_MAX_TRANSFER, 0)
+    if (!target || target.bot || target.id === msg.author.id) return msg.reply("pick a real person to pay")
+    if (!amount) return msg.reply(`amount must be between 1 and ${GAME_MAX_TRANSFER}`)
+    const sender = getGamePlayer(msg.author)
+    const receiver = getGamePlayer(target)
+    if (sender.coins < amount) return msg.reply(`you only have **${sender.coins}** coins`)
+    sender.coins = cleanGameNumber(sender.coins - amount, 0, GAME_MAX_COINS, 0)
+    receiver.coins = cleanGameNumber(receiver.coins + amount, 0, GAME_MAX_COINS, 0)
+    saveGameData()
+    return msg.reply(`sent **${amount}** zeta coins to <@${target.id}>`)
+  }
+
+  if (lower === "zeta game leaderboard" || lower === "zeta gamelb" || lower === "zeta richest") {
+    return msg.reply(`**global zeta game leaderboard**\n${gameLeaderboard()}`)
+  }
+
+  // extra fun commands
+  if (lower === "zeta coinflip" || lower === "zeta flip") {
+    const result = Math.random() < 0.5 ? "heads" : "tails"
+    return msg.reply(`coin says **${result}**`)
+  }
+
+  const rollMatch = lower.match(/^zeta roll\s*(.*)$/)
+  if (rollMatch) {
+    const rolled = rollDice(rollMatch[1] || "d6")
+    if (!rolled) return msg.reply("use it like `zeta roll d20` or `zeta roll 2d6`")
+    const detail = rolled.count > 1 ? ` (${rolled.rolls.join(" + ")})` : ""
+    return msg.reply(`rolled **${rolled.total}** on ${rolled.count}d${rolled.sides}${detail}`)
+  }
+
+  if (lower.startsWith("zeta choose ")) {
+    const choices = parseChoices(raw.replace(/^zeta\s+choose\s+/i, ""))
+    if (choices.length < 2) return msg.reply("give me at least 2 choices, separated by comma or `|`")
+    return msg.reply(`i choose **${randomItem(choices)}**`)
+  }
+
+  if (lower.startsWith("zeta hug")) {
+    const target = msg.mentions.users.first()
+    const targetName = target ? `<@${target.id}>` : msgDisplayName
+    return msg.reply(`${randomItem(HUG_LINES)} for ${targetName}`)
+  }
+
+  if (lower.startsWith("zeta vibe check") || lower.startsWith("zeta vibecheck")) {
+    const target = msg.mentions.users.first()
+    const targetName = target ? (msg.guild?.members.cache.get(target.id)?.displayName || target.username) : msgDisplayName
+    return msg.reply(vibeFor(targetName))
+  }
+
+  if (lower.startsWith("zeta avatar")) {
+    const target = msg.mentions.users.first() || msg.author
+    return msg.reply(target.displayAvatarURL({ size: 1024, extension: "png" }))
+  }
+
+  if (lower === "zeta server info" || lower === "zeta serverinfo") {
+    if (!msg.guild) return msg.reply("server info only works in a server")
+    return msg.reply(`**${msg.guild.name}**\nmembers: **${msg.guild.memberCount}**\nchannels: **${msg.guild.channels.cache.size}**\ncreated: **${msg.guild.createdAt.toDateString()}**`)
+  }
+
   //recommend
   if (lower.startsWith("zeta recommend")) {
     const type = lower.includes("anime") ? "anime" : lower.includes("game") ? "game" : "anime or game"
@@ -820,7 +1300,47 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (commandName === "help") {
-    return interaction.editReply(`**zeta commands** 🤍\n\n**chat**\n\`@zeta [message]\` — talk to me\n\`/moodcheck\` — i'll check on you\n\`/roastme\` — get roasted lol\n\`/rate [thing]\` — i'll rate anything\n\`/tod\` — truth or dare\n\`/compliment\` — zeta compliments you\n\n**info**\n\`/calculate [math]\` — quick math\n\`/translate [text] [language]\` — translate text\n\n**fun**\n\`/trivia\` — trivia question\n\`/8ball [question]\` — magic 8ball\n\`/wouldyourather\` — server votes on a chaotic wyr\n\`/ship [person1] [person2]\` — ship score\n\`/recommend [anime|game]\` — recs\n\n**server**\n\`/poll [question]\` — quick poll with reactions\n\`/quote [text] [author]\` — save a funny quote\n\`/quotes\` — see saved server quotes\n\`/afk [reason]\` — set yourself afk\n\`/leaderboard\` — top chatters\n\`/summarize\` — summarize recent chat\n\`/diary\` — zeta writes a server diary entry\n\`/remind [amount] [unit] [task]\` — set a reminder\n\n**memory**\n\`/memories\` — see what i remember about you\n\`/forget [keyword]\` — make me forget something`)
+return interaction.editReply(`**zeta commands** 🤍
+
+**chat**
+\`@zeta [message]\` — talk to me
+\`/moodcheck\` — i'll check on you
+\`/roastme\` — get roasted lol
+\`/rate [thing]\` — i'll rate anything
+\`/tod\` — truth or dare
+\`/compliment\` — zeta compliments you
+
+**info**
+\`/calculate [math]\` — quick math
+\`/translate [text] [language]\` — translate text
+\`/avatar [user]\` — show avatar
+\`/serverinfo\` — quick server stats
+
+**fun**
+\`/trivia\` — trivia question
+\`/8ball [question]\` — magic 8ball
+\`/wouldyourather\` — server votes on a chaotic wyr
+\`/ship [person1] [person2]\` — ship score
+\`/choose [options]\` — make me choose
+\`/roll [dice]\` — roll dice
+\`/coinflip\` — flip a coin
+\`/hug [user]\` — send a hug
+\`/vibecheck [user]\` — check vibes
+\`/recommend [anime|game]\` — recs
+
+**server**
+\`/poll [question]\` — quick poll with reactions
+\`/quote [text] [author]\` — save a funny quote
+\`/quotes\` — see saved server quotes
+\`/afk [reason]\` — set yourself afk
+\`/leaderboard\` — top chatters
+\`/summarize\` — summarize recent chat
+\`/diary\` — zeta writes a server diary entry
+\`/remind [amount] [unit] [task]\` — set a reminder
+
+**memory**
+\`/memories\` — see what i remember about you
+\`/forget [keyword]\` — make me forget something`)
   }
 
   if (commandName === "trivia") {
@@ -931,6 +1451,103 @@ client.on(Events.InteractionCreate, async interaction => {
       const result = Function(`"use strict"; return (${expr})`)()
       return interaction.editReply(`${expr} = **${result}**`)
     } catch (e) { return interaction.editReply("i can't calculate that lol") }
+  }
+
+  if (commandName === "balance") {
+    const target = interaction.options.getUser("user") || user
+    const targetMember = guild ? await guild.members.fetch(target.id).catch(() => null) : null
+    return interaction.editReply(gameProfile(target, targetMember?.displayName || target.username))
+  }
+
+  if (commandName === "daily") {
+    const player = getGamePlayer(user)
+    return interaction.editReply(claimDailyReward(player))
+  }
+
+  if (commandName === "work") {
+    const player = getGamePlayer(user)
+    return interaction.editReply(doGameWork(player))
+  }
+
+  if (commandName === "hunt") {
+    const player = getGamePlayer(user)
+    return interaction.editReply(doGameHunt(player))
+  }
+
+  if (commandName === "adventure") {
+    const player = getGamePlayer(user)
+    return interaction.editReply(doGameAdventure(player))
+  }
+
+  if (commandName === "shop") {
+    return interaction.editReply(`**zeta shop**\n${shopText()}`)
+  }
+
+  if (commandName === "buy") {
+    const player = getGamePlayer(user)
+    return interaction.editReply(buyGameItem(player, interaction.options.getString("item")))
+  }
+
+  if (commandName === "givecoins") {
+    const target = interaction.options.getUser("user")
+    const amount = cleanGameNumber(interaction.options.getInteger("amount"), 1, GAME_MAX_TRANSFER, 0)
+    if (!target || target.bot || target.id === user.id) return interaction.editReply("pick a real person to pay")
+    if (!amount) return interaction.editReply(`amount must be between 1 and ${GAME_MAX_TRANSFER}`)
+    const sender = getGamePlayer(user)
+    const receiver = getGamePlayer(target)
+    if (sender.coins < amount) return interaction.editReply(`you only have **${sender.coins}** coins`)
+    sender.coins = cleanGameNumber(sender.coins - amount, 0, GAME_MAX_COINS, 0)
+    receiver.coins = cleanGameNumber(receiver.coins + amount, 0, GAME_MAX_COINS, 0)
+    saveGameData()
+    return interaction.editReply(`sent **${amount}** zeta coins to <@${target.id}>`)
+  }
+
+  if (commandName === "gamelb") {
+    return interaction.editReply(`**global zeta game leaderboard**\n${gameLeaderboard()}`)
+  }
+
+  if (commandName === "coinflip") {
+    const result = Math.random() < 0.5 ? "heads" : "tails"
+    return interaction.editReply(`coin says **${result}**`)
+  }
+
+  if (commandName === "roll") {
+    const rolled = rollDice(interaction.options.getString("dice") || "d6")
+    if (!rolled) return interaction.editReply("use dice like `d20` or `2d6` with sides from 2 to 1000")
+    const detail = rolled.count > 1 ? ` (${rolled.rolls.join(" + ")})` : ""
+    return interaction.editReply(`rolled **${rolled.total}** on ${rolled.count}d${rolled.sides}${detail}`)
+  }
+
+  if (commandName === "choose") {
+    const choices = parseChoices(interaction.options.getString("options"))
+    if (choices.length < 2) return interaction.editReply("give me at least 2 choices, separated by comma or `|`")
+    return interaction.editReply(`i choose **${randomItem(choices)}**`)
+  }
+
+  if (commandName === "hug") {
+    const target = interaction.options.getUser("user")
+    const targetName = target ? `<@${target.id}>` : displayName
+    return interaction.editReply(`${randomItem(HUG_LINES)} for ${targetName}`)
+  }
+
+  if (commandName === "vibecheck") {
+    const target = interaction.options.getUser("user")
+    let targetName = displayName
+    if (target && guild) {
+      const targetMember = await guild.members.fetch(target.id).catch(() => null)
+      targetName = targetMember?.displayName || target.username
+    } else if (target) targetName = target.username
+    return interaction.editReply(vibeFor(targetName))
+  }
+
+  if (commandName === "avatar") {
+    const target = interaction.options.getUser("user") || user
+    return interaction.editReply(target.displayAvatarURL({ size: 1024, extension: "png" }))
+  }
+
+  if (commandName === "serverinfo") {
+    if (!guild) return interaction.editReply("server info only works in a server")
+    return interaction.editReply(`**${guild.name}**\nmembers: **${guild.memberCount}**\nchannels: **${guild.channels.cache.size}**\ncreated: **${guild.createdAt.toDateString()}**`)
   }
 
   if (commandName === "recommend") {

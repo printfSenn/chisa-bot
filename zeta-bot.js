@@ -22,6 +22,20 @@ const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY
 const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL
 const WEATHER_KEY = process.env.WEATHER_KEY
 
+// Validate required environment variables
+if (!process.env.DISCORD_TOKEN_ZETA) {
+  console.error("ERROR: DISCORD_TOKEN_ZETA is not set in .env file")
+  process.exit(1)
+}
+if (!MISTRAL_API_KEY) {
+  console.error("ERROR: MISTRAL_API_KEY is not set in .env file")
+  process.exit(1)
+}
+if (!DATABASE_URL) {
+  console.error("ERROR: DATABASE_URL (or POSTGRES_URL/NEON_DATABASE_URL) is not set in .env file")
+  process.exit(1)
+}
+
 function parseIdList(value) {
   return String(value || "").split(",").map(id => id.trim()).filter(Boolean)
 }
@@ -59,6 +73,30 @@ const dbPool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, ssl: { 
 async function dbQuery(text, params = []) {
   if (!dbPool) throw new Error("DATABASE_URL not configured")
   return dbPool.query(text, params)
+}
+
+async function initAFKTable() {
+  try {
+    await dbQuery(`CREATE TABLE IF NOT EXISTS afk_users (user_id TEXT NOT NULL, guild_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT 'no reason', since BIGINT NOT NULL, PRIMARY KEY (user_id, guild_id))`)
+    await dbQuery(`CREATE TABLE IF NOT EXISTS memories (id bigint generated always as identity primary key, user_id text, guild_id text, content text, created_at timestamptz default now())`)
+    await dbQuery(`CREATE TABLE IF NOT EXISTS quotes (id bigint generated always as identity primary key, guild_id text, text text, author text, saved_by text, created_at timestamptz default now())`)
+    await dbQuery(`CREATE TABLE IF NOT EXISTS chat_activity (guild_id text, user_id text, username text, message_count int default 0, milestones_sent jsonb default '[]', updated_at timestamptz default now(), primary key (guild_id, user_id))`)
+  } catch (e) { console.error("[DB] initAFKTable error:", e) }
+}
+
+async function dbSetAFK(userId, guildId, reason, since) {
+  try { await dbQuery(`INSERT INTO afk_users (user_id, guild_id, reason, since) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id, guild_id) DO UPDATE SET reason=$3, since=$4`, [userId, guildId || "dm", reason, since]) }
+  catch (e) { console.error("[DB] dbSetAFK error:", e) }
+}
+
+async function dbRemoveAFK(userId, guildId) {
+  try { await dbQuery(`DELETE FROM afk_users WHERE user_id=$1 AND guild_id=$2`, [userId, guildId || "dm"]) }
+  catch (e) { console.error("[DB] dbRemoveAFK error:", e) }
+}
+
+async function dbLoadAFKUsers() {
+  try { const r = await dbQuery(`SELECT * FROM afk_users`); return r.rows } 
+  catch (e) { console.error("[DB] dbLoadAFKUsers error:", e); return [] }
 }
 
 const history = new Map()
@@ -499,9 +537,6 @@ async function getServerActivityLeaderboard(guild) {
   return rows.slice(0, 10)
 }
 
-function dbEq(value) {
-  return encodeURIComponent(String(value ?? "dm"))
-}
 
 function normalizeGuildId(guildId) {
   return guildId || "dm"
@@ -786,7 +821,7 @@ async function reply(channelId, msg, user, userId, guildId) {
   if (memories.length > 0) systemPrompt += `\n\nThings you remember:\n${memories.map(m => `- ${m}`).join("\n")}`
   const info = await getRelevantInfo(msg)
   if (info) systemPrompt += `\n\nReal-time data:\n${info}`
-  const now = new Date().toLocaleString("en-ID", { timeZone: "Asia/Jakarta" })
+  const now = new Date().toLocaleString("en-ID", { timeZone: ZETA_CONFIG.timezone })
   systemPrompt += `\n\nCurrent time (WIB): ${now}`
 
   addHistory(channelId, "user", `${user}: ${msg}`)
@@ -859,6 +894,10 @@ async function maybeReactToChisa(msg) {
 
 client.once(Events.ClientReady, async c => {
   console.log(`Zeta logged in as ${c.user.tag}`)
+  await initAFKTable()
+  const savedAFK = await dbLoadAFKUsers()
+  for (const row of savedAFK) afkUsers.set(row.user_id, { reason: row.reason, since: Number(row.since), guildId: row.guild_id })
+  if (savedAFK.length) console.log(`[DB] Restored ${savedAFK.length} AFK user(s)`)
 
   // register slash commands
   const commands = [
@@ -922,7 +961,7 @@ client.once(Events.ClientReady, async c => {
 
   function scheduleMorning() {
     const now = new Date()
-    const wib = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Jakarta" }))
+    const wib = new Date(now.toLocaleString("en-US", { timeZone: ZETA_CONFIG.timezone }))
     const next7 = new Date(wib)
     next7.setHours(ZETA_CONFIG.morningHourWib, ZETA_CONFIG.morningMinuteWib, 0, 0)
     if (wib >= next7) next7.setDate(next7.getDate() + 1)
@@ -1028,7 +1067,7 @@ client.on(Events.MessageCreate, async msg => {
 
   // track owner active hours
   if (isOwner) {
-    const nowWib = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" }))
+    const nowWib = new Date(new Date().toLocaleString("en-US", { timeZone: ZETA_CONFIG.timezone }))
     const hour = nowWib.getHours()
     const dateHourKey = `${nowWib.toDateString()}_${hour}`
     ownerHourCounts[hour]++
@@ -1043,7 +1082,7 @@ client.on(Events.MessageCreate, async msg => {
   // afk return detection
   if (afkUsers.has(msg.author.id) && !lower.startsWith("zeta afk")) {
     const afkData = afkUsers.get(msg.author.id)
-    afkUsers.delete(msg.author.id)
+    afkUsers.delete(msg.author.id); await dbRemoveAFK(msg.author.id, msg.guild?.id)
     const afkDuration = formatAfkDuration(afkData.since)
     await msg.channel.send(`${msgDisplayName} is back from AFK: *${afkData.reason}* for **${afkDuration}**.`)
   }
@@ -1106,7 +1145,7 @@ return msg.reply(`**zeta commands** 🤍
   // afk command
   if (lower.startsWith("zeta afk")) {
     const reason = raw.replace(/^zeta\s+afk\s*/i, "").trim() || "no reason given"
-    afkUsers.set(msg.author.id, { reason, since: Date.now() })
+    const _afkSince = Date.now(); afkUsers.set(msg.author.id, { reason, since: _afkSince }); await dbSetAFK(msg.author.id, msg.guild?.id, reason, _afkSince)
     const afkPrompt = `You are Zeta. ${msgDisplayName} is going AFK with reason: "${reason}". Announce it casually to the server in one short sentence in your texting style.`
     const text = await callMistral(afkPrompt, [{ role: "user", content: "going afk" }])
     return msg.reply(text || `${msgDisplayName} is now AFK. Reason: ${reason}`)
@@ -1456,7 +1495,7 @@ client.on(Events.InteractionCreate, async interaction => {
   // afk return detection for slash commands
   if (afkUsers.has(user.id) && commandName !== "afk") {
     const afkData = afkUsers.get(user.id)
-    afkUsers.delete(user.id)
+    afkUsers.delete(user.id); await dbRemoveAFK(user.id, guild?.id)
     const afkDuration = formatAfkDuration(afkData.since)
     try { await channel.send(`${displayName} is back from AFK: *${afkData.reason}* for **${afkDuration}**.`) } catch (e) {}
   }
@@ -1791,8 +1830,8 @@ return interaction.editReply(`**zeta commands** 🤍
       pollText = `**📢 poll**\n\n${question}\n\n✅ yes  |  ❌ no`
       reactions = ["✅", "❌"]
     } else {
-      pollText = `**📢 poll**\n\n${question}\n\n🅰️ ${optA || "Option A"}${optB ? `\n🅱️ ${optB}` : ""}${optC ? `\n🆞️ ${optC}` : ""}`
-      reactions = ["🅰️", optB ? "🅱️" : null, optC ? "🆞️" : null].filter(Boolean)
+      pollText = `**📢 poll**\n\n${question}\n\n🅰️ ${optA || "Option A"}${optB ? `\n🅱️ ${optB}` : ""}${optC ? `\n🇨 ${optC}` : ""}`
+      reactions = ["🅰️", optB ? "🅱️" : null, optC ? "🇨" : null].filter(Boolean)
     }
     await interaction.editReply(pollText)
     const pollMsg = await interaction.fetchReply()
@@ -1804,7 +1843,7 @@ return interaction.editReply(`**zeta commands** 🤍
     const text = interaction.options.getString("text")
     const author = interaction.options.getString("author") || "unknown"
     await saveQuote(guild?.id, text, author, displayName)
-    return interaction.editReply(`saved! ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…â€™ *"${text}"* — ${author}`)
+    return interaction.editReply(`saved! 📌 *"${text}"* — ${author}`)
   }
 
   if (commandName === "quotes") {
@@ -1816,12 +1855,12 @@ return interaction.editReply(`**zeta commands** 🤍
       if (list.length + line.length > 1800) { list += `\n*...and ${quotes.length - i} more*`; break }
       list += line
     }
-    return interaction.editReply(`**ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…â€™ server quotes**\n\n${list}`)
+    return interaction.editReply(`**📌 server quotes**\n\n${list}`)
   }
 
   if (commandName === "afk") {
     const reason = interaction.options.getString("reason") || "no reason given"
-    afkUsers.set(user.id, { reason, since: Date.now() })
+    const _afkSince2 = Date.now(); afkUsers.set(user.id, { reason, since: _afkSince2 }); await dbSetAFK(user.id, guild?.id, reason, _afkSince2)
     const afkPrompt = `You are Zeta. ${displayName} is going AFK with reason: "${reason}". Announce it casually to the server in one short sentence in your texting style.`
     const text = await callMistral(afkPrompt, [{ role: "user", content: "going afk" }])
     return interaction.editReply(text || `${displayName} is going AFK — ${reason}`)

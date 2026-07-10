@@ -20,7 +20,15 @@ const PROMPT = `You are Chisa, a tsundere AI chatbot living in a Discord server.
 const CHANCE = 0.3
 
 // Key rotation
+if (!process.env.GROQ_API_KEY) {
+  console.error("ERROR: GROQ_API_KEY is not set in .env file")
+  process.exit(1)
+}
 const GROQ_KEYS = process.env.GROQ_API_KEY.split(",").map(k => k.trim()).filter(Boolean)
+if (!GROQ_KEYS.length) {
+  console.error("ERROR: GROQ_API_KEY is empty or invalid")
+  process.exit(1)
+}
 let keyIndex = 0
 function getNextKey() {
   const key = GROQ_KEYS[keyIndex]

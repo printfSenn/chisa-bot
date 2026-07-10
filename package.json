@@ -1,13 +1,13 @@
-{
-  "name": "chisa",
-  "version": "1.0.0",
-  "main": "bot.js",
-  "scripts": {
-    "start": "node bot.js"
-  },
-  "dependencies": {
-    "discord.js": "^14.16.3",
-    "dotenv": "^16.0.0",
-    "pg": "^8.22.0"
-  }
+﻿{
+    "name":  "chisa",
+    "version":  "1.0.0",
+    "main":  "zeta-bot.js",
+    "scripts":  {
+                    "start":  "node zeta-bot.js"
+                },
+    "dependencies":  {
+                         "discord.js":  "^14.16.3",
+                         "dotenv":  "^16.0.0",
+                         "pg":  "^8.22.0"
+                     }
 }

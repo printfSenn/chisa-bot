@@ -22,6 +22,23 @@ const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY
 const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL
 const WEATHER_KEY = process.env.WEATHER_KEY
 
+function getDatabasePoolConfig(connectionString) {
+  const config = {
+    connectionString,
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 5000
+  }
+  try {
+    const parsed = new URL(connectionString)
+    const sslMode = parsed.searchParams.get("sslmode")
+    if (sslMode?.toLowerCase() === "require" && !parsed.searchParams.has("uselibpqcompat")) {
+      parsed.searchParams.set("uselibpqcompat", "true")
+      config.connectionString = parsed.toString()
+    }
+  } catch (e) {}
+  return config
+}
+
 // Validate required environment variables
 if (!process.env.DISCORD_TOKEN_ZETA) {
   console.error("ERROR: DISCORD_TOKEN_ZETA is not set in .env file")
@@ -69,7 +86,7 @@ async function getConfiguredTextChannels(channelIds) {
   return channels
 }
 
-const dbPool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } }) : null
+const dbPool = DATABASE_URL ? new Pool(getDatabasePoolConfig(DATABASE_URL)) : null
 async function dbQuery(text, params = []) {
   if (!dbPool) throw new Error("DATABASE_URL not configured")
   return dbPool.query(text, params)
@@ -1902,4 +1919,18 @@ return interaction.editReply(`**zeta commands** 🤍
   }
 })
 
+client.on("shardError", error => {
+  console.error("Discord shard error:", error?.message || error)
+})
+
+client.on("shardDisconnect", event => {
+  console.error(`Discord shard disconnected: code=${event?.code || "unknown"} reason=${event?.reason || "none"}`)
+})
+
+console.log("Starting Zeta Discord login...")
 client.login(process.env.DISCORD_TOKEN_ZETA)
+  .then(() => console.log("Zeta Discord login completed"))
+  .catch(error => {
+    console.error("Zeta Discord login failed:", error?.message || error)
+    process.exit(1)
+  })

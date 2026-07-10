@@ -1,4 +1,4 @@
-require('dotenv').config()
+﻿require('dotenv').config()
 const fs = require("fs")
 const path = require("path")
 const crypto = require("crypto")
@@ -323,11 +323,11 @@ function gameProfile(user, displayName) {
 function gameLeaderboard() {
   const top = [...gamePlayers.values()].sort((a, b) => (b.coins - a.coins) || (b.level - a.level) || (b.xp - a.xp)).slice(0, 10)
   if (!top.length) return "no adventurers yet. tragic honestly"
-  return top.map((p, i) => `${i + 1}. **${p.username || "unknown"}** — ${p.coins} coins, lvl ${p.level}`).join("\n")
+  return top.map((p, i) => `${i + 1}. **${p.username || "unknown"}** â€” ${p.coins} coins, lvl ${p.level}`).join("\n")
 }
 
 function shopText() {
-  return Object.entries(GAME_ITEMS).map(([id, item]) => `**${id}** — ${item.price} coins: ${item.description}`).join("\n")
+  return Object.entries(GAME_ITEMS).map(([id, item]) => `**${id}** â€” ${item.price} coins: ${item.description}`).join("\n")
 }
 
 function claimDailyReward(player) {
@@ -654,7 +654,7 @@ async function getWeather(city) {
     const res = await fetch(`https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${WEATHER_KEY}&units=metric`)
     const data = await res.json()
     if (data.cod !== 200) return null
-    return `Weather in ${data.name}: ${data.main.temp}°C, feels like ${data.main.feels_like}°C, ${data.weather[0].description}. Humidity: ${data.main.humidity}%`
+    return `Weather in ${data.name}: ${data.main.temp}Â°C, feels like ${data.main.feels_like}Â°C, ${data.weather[0].description}. Humidity: ${data.main.humidity}%`
   } catch (e) { return null }
 }
 
@@ -1031,7 +1031,7 @@ client.on(Events.MessageCreate, async msg => {
     return
   }
 
-  // afk mention detection — runs before any lock or early return
+  // afk mention detection â€” runs before any lock or early return
   if (afkUsers.size > 0) {
     const mentionedUserIds = new Set([
       ...msg.mentions.users.keys(),
@@ -1098,51 +1098,51 @@ client.on(Events.MessageCreate, async msg => {
 
   // zeta help
   if (lower === "zeta help") {
-return msg.reply(`**zeta commands** 🤍
+return msg.reply(`**zeta commands** ðŸ¤
 
 **chat**
-\`@zeta [message]\` — talk to me
-\`zeta mood check\` — i'll check on you
-\`zeta roast me\` — get roasted lol
-\`zeta rate [thing]\` — i'll rate anything
-\`zeta tod\` / \`zeta truth or dare\` — truth or dare
+\`@zeta [message]\` â€” talk to me
+\`zeta mood check\` â€” i'll check on you
+\`zeta roast me\` â€” get roasted lol
+\`zeta rate [thing]\` â€” i'll rate anything
+\`zeta tod\` / \`zeta truth or dare\` â€” truth or dare
 
 **info**
-\`zeta [ask anything]\` — weather, currency, stocks, wiki
-\`zeta calculate [math]\` — quick math
-\`zeta translate [text] to [language]\` — translate text
-\`zeta avatar [@user]\` — show avatar
-\`zeta server info\` — quick server stats
+\`zeta [ask anything]\` â€” weather, currency, stocks, wiki
+\`zeta calculate [math]\` â€” quick math
+\`zeta translate [text] to [language]\` â€” translate text
+\`zeta avatar [@user]\` â€” show avatar
+\`zeta server info\` â€” quick server stats
 
 **fun**
-\`zeta trivia\` — trivia question
-\`zeta ship [person1] and [person2]\` — ship score
-\`zeta choose a, b, c\` — make me choose
-\`zeta roll d20\` — roll dice
-\`zeta coinflip\` — flip a coin
-\`zeta hug [@user]\` — send a hug
-\`zeta vibe check [@user]\` — check vibes
-\`zeta recommend anime\` / \`zeta recommend game\` — recs
+\`zeta trivia\` â€” trivia question
+\`zeta ship [person1] and [person2]\` â€” ship score
+\`zeta choose a, b, c\` â€” make me choose
+\`zeta roll d20\` â€” roll dice
+\`zeta coinflip\` â€” flip a coin
+\`zeta hug [@user]\` â€” send a hug
+\`zeta vibe check [@user]\` â€” check vibes
+\`zeta recommend anime\` / \`zeta recommend game\` â€” recs
 
 **memory**
-\`zeta memories\` — see what i remember about you
-\`zeta forget [keyword]\` — make me forget something
+\`zeta memories\` â€” see what i remember about you
+\`zeta forget [keyword]\` â€” make me forget something
 
 **game**
-\`zeta balance\` / \`zeta profile\` — coins, level, inventory
-\`zeta daily\` — daily global coins
-\`zeta work\` — earn coins every 30 min
-\`zeta hunt\` — hunt monsters every 10 min
-\`zeta adventure\` — risky RPG run every hour
-\`zeta shop\` / \`zeta buy [item]\` — buy items
-\`zeta give @user [amount]\` — send coins
-\`zeta gamelb\` — global game leaderboard
+\`zeta balance\` / \`zeta profile\` â€” coins, level, inventory
+\`zeta daily\` â€” daily global coins
+\`zeta work\` â€” earn coins every 30 min
+\`zeta hunt\` â€” hunt monsters every 10 min
+\`zeta adventure\` â€” risky RPG run every hour
+\`zeta shop\` / \`zeta buy [item]\` â€” buy items
+\`zeta give @user [amount]\` â€” send coins
+\`zeta gamelb\` â€” global game leaderboard
 
 **server**
-\`zeta afk [reason]\` — set yourself afk
-\`zeta leaderboard\` / \`zeta lb\` — top chatters
-\`zeta summarize\` — summarize recent chat
-\`zeta remind me [time] to [task]\` — set a reminder`)
+\`zeta afk [reason]\` â€” set yourself afk
+\`zeta leaderboard\` / \`zeta lb\` â€” top chatters
+\`zeta summarize\` â€” summarize recent chat
+\`zeta remind me [time] to [task]\` â€” set a reminder`)
   }
 
   // afk command
@@ -1234,14 +1234,14 @@ return msg.reply(`**zeta commands** 🤍
     if (!textToTranslate) return msg.reply(`how to use: \`zeta translate [text] to [language]\`\nexample: \`zeta translate hello to indonesian\``)
     await msg.channel.sendTyping()
     const result = await translate(textToTranslate, targetLang)
-    return msg.reply(result ? `**${textToTranslate}** → **${result}**` : "couldn't translate that sorry")
+    return msg.reply(result ? `**${textToTranslate}** â†’ **${result}**` : "couldn't translate that sorry")
   }
 
   //calculate / convert
   const calcMatch = lower.match(/zeta (?:calculate|calc|convert)\s+(.+)/)
   if (calcMatch) {
     try {
-      const expr = calcMatch[1].replace(/x/g, "*").replace(/÷/g, "/")
+      const expr = calcMatch[1].replace(/x/g, "*").replace(/Ã·/g, "/")
       const result = Function(`"use strict"; return (${expr})`)()
       return msg.reply(`${calcMatch[1]} = **${result}**`)
     } catch (e) {
@@ -1254,7 +1254,7 @@ return msg.reply(`**zeta commands** 🤍
     await msg.channel.sendTyping()
     const categories = ["science", "history", "geography", "pop culture", "anime", "gaming", "food", "sports", "technology", "movies", "music", "nature", "mathematics", "literature", "mythology"]
     const randomCategory = categories[Math.floor(Math.random() * categories.length)]
-    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed — not always B. Mix it up. Format exactly like:
+    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed â€” not always B. Mix it up. Format exactly like:
 Question: [question]
 A) [option]
 B) [option]
@@ -1289,7 +1289,7 @@ Answer: [letter only, e.g. C]`
     const guess = raw.trim().toUpperCase()
     triviaGames.delete(msg.channel.id)
     if (guess === game.answer) {
-      return msg.reply("yesss you got it right!! 🎉")
+      return msg.reply("yesss you got it right!! ðŸŽ‰")
     } else {
       return msg.reply(`nope! the answer was **${game.answer}** lol`)
     }
@@ -1321,7 +1321,7 @@ Answer: [letter only, e.g. C]`
     const shipPrompt = `You are Zeta. You just calculated a ship score of ${score}% for ${p1} and ${p2}. React to this score in your casual funny style. Short.`
     await msg.channel.sendTyping()
     const text = await callMistral(shipPrompt, [{ role: "user", content: raw }])
-    return msg.reply(`💘 **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
+    return msg.reply(`ðŸ’˜ **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
   }
 
   //tod
@@ -1454,7 +1454,7 @@ Answer: [letter only, e.g. C]`
   if (lower === "zeta leaderboard" || lower === "zeta lb") {
     const guildCounts = await getServerActivityLeaderboard(msg.guild)
     if (!guildCounts.length) return msg.reply("no activity tracked yet!")
-    const medals = ["🥇", "🥈", "🥉"]
+    const medals = ["ðŸ¥‡", "ðŸ¥ˆ", "ðŸ¥‰"]
     const list = []
     for (let i = 0; i < guildCounts.length; i++) {
       const row = guildCounts[i]
@@ -1463,7 +1463,7 @@ Answer: [letter only, e.g. C]`
         const member = await msg.guild.members.fetch(row.userId)
         name = member.displayName || member.user.username
       } catch (e) {}
-      list.push(`${medals[i] || `${i + 1}.`} **${name}** — ${row.count} messages`)
+      list.push(`${medals[i] || `${i + 1}.`} **${name}** â€” ${row.count} messages`)
     }
     return msg.reply(`**server leaderboard**\n${list.join("\n")}`)
   }
@@ -1498,59 +1498,65 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (commandName === "help") {
-return interaction.editReply(`**zeta commands** 🤍
+return interaction.editReply(`**zeta commands** ðŸ¤
 
 **chat**
-\`@zeta [message]\` — talk to me
-\`/moodcheck\` — i'll check on you
-\`/roastme\` — get roasted lol
-\`/rate [thing]\` — i'll rate anything
-\`/tod\` — truth or dare
-\`/compliment\` — zeta compliments you
+\`@zeta [message]\` â€” talk to me
+\`/moodcheck\` â€” i'll check on you
+\`/roastme\` â€” get roasted lol
+\`/rate [thing]\` â€” i'll rate anything
+\`/tod\` â€” truth or dare
+\`/compliment\` â€” zeta compliments you
 
 **info**
-\`/calculate [math]\` — quick math
-\`/translate [text] [language]\` — translate text
-\`/avatar [user]\` — show avatar
-\`/serverinfo\` — quick server stats
+\`/calculate [math]\` â€” quick math
+\`/translate [text] [language]\` â€” translate text
+\`/avatar [user]\` â€” show avatar
+\`/serverinfo\` â€” quick server stats
 
 **fun**
-\`/trivia\` — trivia question
-\`/8ball [question]\` — magic 8ball
-\`/wouldyourather\` — server votes on a chaotic wyr
-\`/ship [person1] [person2]\` — ship score
-\`/choose [options]\` — make me choose
-\`/roll [dice]\` — roll dice
-\`/coinflip\` — flip a coin
-\`/hug [user]\` — send a hug
-\`/vibecheck [user]\` — check vibes
-\`/recommend [anime|game]\` — recs
+\`/trivia\` â€” trivia question
+\`/8ball [question]\` â€” magic 8ball
+\`/wouldyourather\` â€” server votes on a chaotic wyr
+\`/ship [person1] [person2]\` â€” ship score
+\`/choose [options]\` â€” make me choose
+\`/roll [dice]\` â€” roll dice
+\`/coinflip\` â€” flip a coin
+\`/hug [user]\` â€” send a hug
+\`/vibecheck [user]\` â€” check vibes
+\`/recommend [anime|game]\` â€” recs
 
 **server**
-\`/poll [question]\` — quick poll with reactions
-\`/quote [text] [author]\` — save a funny quote
-\`/quotes\` — see saved server quotes
-\`/afk [reason]\` — set yourself afk
-\`/leaderboard\` — top chatters
-\`/summarize\` — summarize recent chat
-\`/diary\` — zeta writes a server diary entry
-\`/remind [amount] [unit] [task]\` — set a reminder
+\`/poll [question]\` â€” quick poll with reactions
+\`/quote [text] [author]\` â€” save a funny quote
+\`/quotes\` â€” see saved server quotes
+\`/afk [reason]\` â€” set yourself afk
+\`/leaderboard\` â€” top chatters
+\`/summarize\` â€” summarize recent chat
+\`/diary\` â€” zeta writes a server diary entry
+\`/remind [amount] [unit] [task]\` â€” set a reminder
 
 **memory**
-\`/memories\` — see what i remember about you
-\`/forget [keyword]\` — make me forget something`)
+\`/memories\` â€” see what i remember about you
+\`/forget [keyword]\` â€” make me forget something`)
   }
 
   if (commandName === "setrandomchannel") {
     if (!guild) return interaction.editReply("this only works in a server")
-    const ok = await saveBotSettings(guild.id, { random_channel_id: channel.id })
-    return interaction.editReply(ok ? `random messages will go to <#${channel.id}> now` : "could not save that channel. check database settings")
+    const result = await saveBotSettings(guild.id, { random_channel_id: channel.id })
+    if (result.ok) {
+      return interaction.editReply(result.fallback ? `random messages will go to <#${channel.id}> now, but Supabase was unavailable so I saved it locally for now` : `random messages will go to <#${channel.id}> now`)
+    }
+    return interaction.editReply(`could not save that channel. ${result.error ? `Last error: ${String(result.error).slice(0, 180)}` : "check database settings"}`)
   }
 
   if (commandName === "setmorningchannel") {
     if (!guild) return interaction.editReply("this only works in a server")
-    const ok = await saveBotSettings(guild.id, { morning_channel_id: channel.id })
-    return interaction.editReply(ok ? `7AM greetings will go to <#${channel.id}> now` : "could not save that channel. check database settings")
+    const result = await saveBotSettings(guild.id, { morning_channel_id: channel.id })
+    if (result.ok) {
+      return interaction.editReply(result.fallback ? `7AM greetings will go to <#${channel.id}> now, but Supabase was unavailable so I saved it locally for now` : `7AM greetings will go to <#${channel.id}> now`)
+    }
+    return interaction.editReply(`could not save that channel. ${result.error ? `Last error: ${String(result.error).slice(0, 180)}` : "check database settings"}`)
   }
 
   if (commandName === "schedulechannels") {
@@ -1564,7 +1570,7 @@ return interaction.editReply(`**zeta commands** 🤍
   if (commandName === "trivia") {
     const categories = ["science", "history", "geography", "pop culture", "anime", "gaming", "food", "sports", "technology", "movies", "music", "nature", "mathematics", "literature", "mythology"]
     const randomCategory = categories[Math.floor(Math.random() * categories.length)]
-    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed — not always B. Mix it up. Format exactly like:\nQuestion: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nAnswer: [letter only, e.g. C]`
+    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed â€” not always B. Mix it up. Format exactly like:\nQuestion: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nAnswer: [letter only, e.g. C]`
     const text = await callMistral(triviaPrompt, [{ role: "user", content: `give me a trivia question about ${randomCategory}` }])
     if (!text) return interaction.editReply("my brain is empty rn, try again")
     const answerMatch = text.match(/^Answer[:\s*\-]+\**\s*([A-D])\b/im)
@@ -1594,7 +1600,7 @@ return interaction.editReply(`**zeta commands** 🤍
   if (commandName === "leaderboard" || commandName === "lb") {
     const guildCounts = await getServerActivityLeaderboard(guild)
     if (!guildCounts.length) return interaction.editReply("no activity tracked yet!")
-    const medals = ["🥇", "🥈", "🥉"]
+    const medals = ["ðŸ¥‡", "ðŸ¥ˆ", "ðŸ¥‰"]
     const list = []
     for (let i = 0; i < guildCounts.length; i++) {
       const row = guildCounts[i]
@@ -1603,7 +1609,7 @@ return interaction.editReply(`**zeta commands** 🤍
         const m = await guild.members.fetch(row.userId)
         name = m.displayName || m.user.username
       } catch (e) {}
-      list.push(`${medals[i] || `${i + 1}.`} **${name}** — ${row.count} messages`)
+      list.push(`${medals[i] || `${i + 1}.`} **${name}** â€” ${row.count} messages`)
     }
     return interaction.editReply(`**server leaderboard**\n${list.join("\n")}`)
   }
@@ -1654,7 +1660,7 @@ return interaction.editReply(`**zeta commands** 🤍
     const p2 = interaction.options.getString("person2")
     const score = Math.floor(Math.random() * 101)
     const text = await callMistral(`You are Zeta. You just calculated a ship score of ${score}% for ${p1} and ${p2}. React casually and funny. Short.`, [{ role: "user", content: `ship ${p1} and ${p2}` }])
-    return interaction.editReply(`💘 **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
+    return interaction.editReply(`ðŸ’˜ **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
   }
 
   if (commandName === "translate") {
@@ -1662,11 +1668,11 @@ return interaction.editReply(`**zeta commands** 🤍
     const langInput = interaction.options.getString("language").toLowerCase()
     const targetLang = langMap[langInput] || langInput
     const result = await translate(textToTranslate, targetLang)
-    return interaction.editReply(result ? `**${textToTranslate}** → **${result}**` : "couldn't translate that sorry")
+    return interaction.editReply(result ? `**${textToTranslate}** â†’ **${result}**` : "couldn't translate that sorry")
   }
 
   if (commandName === "calculate") {
-    const expr = interaction.options.getString("expression").replace(/x/g, "*").replace(/÷/g, "/")
+    const expr = interaction.options.getString("expression").replace(/x/g, "*").replace(/Ã·/g, "/")
     try {
       const result = Function(`"use strict"; return (${expr})`)()
       return interaction.editReply(`${expr} = **${result}**`)
@@ -1784,11 +1790,11 @@ return interaction.editReply(`**zeta commands** 🤍
       ? `You are Zeta, wife of Senn. He asked the magic 8ball: "${question}". Answer like a magic 8ball but in your casual texting voice. Be a little dramatic or teasing. One or two sentences max.`
       : `You are Zeta. Someone asked the magic 8ball: "${question}". Answer like a magic 8ball but in your casual texting voice. One or two sentences max.`
     const text = await callMistral(eightBallPrompt, [{ role: "user", content: question }])
-    return interaction.editReply(`🎱 *${question}*\n\n${text || "the 8ball is broken rn lol"}`)
+    return interaction.editReply(`ðŸŽ± *${question}*\n\n${text || "the 8ball is broken rn lol"}`)
   }
 
   if (commandName === "wouldyourather") {
-    const wyrPrompt = `You are Zeta. Generate a chaotic, funny, slightly unhinged "would you rather" with two options. Make it interesting — not boring. Format exactly like:\nOption A: [option]\nOption B: [option]`
+    const wyrPrompt = `You are Zeta. Generate a chaotic, funny, slightly unhinged "would you rather" with two options. Make it interesting â€” not boring. Format exactly like:\nOption A: [option]\nOption B: [option]`
     const text = await callMistral(wyrPrompt, [{ role: "user", content: "give me a would you rather" }])
     if (!text) return interaction.editReply("my brain short circuited, try again")
     const aMatch = text.match(/Option A:\s*(.+)/i)
@@ -1796,19 +1802,19 @@ return interaction.editReply(`**zeta commands** 🤍
     if (!aMatch || !bMatch) return interaction.editReply(text)
     const optA = aMatch[1].trim()
     const optB = bMatch[1].trim()
-    await interaction.editReply(`**would you rather...**\n\n🅰️ ${optA}\n\n🆚\n\n🅱️ ${optB}\n\nvote below!`)
+    await interaction.editReply(`**would you rather...**\n\nðŸ…°ï¸ ${optA}\n\nðŸ†š\n\nðŸ…±ï¸ ${optB}\n\nvote below!`)
     const wyrMsg = await interaction.fetchReply()
-    await wyrMsg.react("🅰️")
-    await wyrMsg.react("🅱️")
+    await wyrMsg.react("ðŸ…°ï¸")
+    await wyrMsg.react("ðŸ…±ï¸")
     return
   }
 
   if (commandName === "compliment") {
     const complimentPrompt = isOwner
       ? `You are Zeta, wife of Senn. Compliment him genuinely and softly in your casual texting style. Make it feel real, not over the top. Short.`
-      : `You are Zeta. Compliment ${displayName} in a friendly, casual way. Cute but not romantic — you're taken. Short.`
+      : `You are Zeta. Compliment ${displayName} in a friendly, casual way. Cute but not romantic â€” you're taken. Short.`
     const text = await callMistral(complimentPrompt, [{ role: "user", content: "compliment me" }])
-    return interaction.editReply(text || `you're genuinely awesome ${displayName} 🤍`)
+    return interaction.editReply(text || `you're genuinely awesome ${displayName} ðŸ¤`)
   }
 
   if (commandName === "poll") {
@@ -1818,11 +1824,11 @@ return interaction.editReply(`**zeta commands** 🤍
     const optC = interaction.options.getString("option_c")
     let pollText, reactions
     if (!optA && !optB) {
-      pollText = `**📊 poll**\n\n${question}\n\n✅ yes  |  ❌ no`
-      reactions = ["✅", "❌"]
+      pollText = `**ðŸ“Š poll**\n\n${question}\n\nâœ… yes  |  âŒ no`
+      reactions = ["âœ…", "âŒ"]
     } else {
-      pollText = `**📊 poll**\n\n${question}\n\n🇦 ${optA || "Option A"}${optB ? `\n🇧 ${optB}` : ""}${optC ? `\n🇨 ${optC}` : ""}`
-      reactions = ["🇦", optB ? "🇧" : null, optC ? "🇨" : null].filter(Boolean)
+      pollText = `**ðŸ“Š poll**\n\n${question}\n\nðŸ‡¦ ${optA || "Option A"}${optB ? `\nðŸ‡§ ${optB}` : ""}${optC ? `\nðŸ‡¨ ${optC}` : ""}`
+      reactions = ["ðŸ‡¦", optB ? "ðŸ‡§" : null, optC ? "ðŸ‡¨" : null].filter(Boolean)
     }
     await interaction.editReply(pollText)
     const pollMsg = await interaction.fetchReply()
@@ -1834,7 +1840,7 @@ return interaction.editReply(`**zeta commands** 🤍
     const text = interaction.options.getString("text")
     const author = interaction.options.getString("author") || "unknown"
     await saveQuote(guild?.id, text, author, displayName)
-    return interaction.editReply(`saved! 📌 *"${text}"* — ${author}`)
+    return interaction.editReply(`saved! ðŸ“Œ *"${text}"* â€” ${author}`)
   }
 
   if (commandName === "quotes") {
@@ -1842,11 +1848,11 @@ return interaction.editReply(`**zeta commands** 🤍
     if (!quotes.length) return interaction.editReply("no quotes saved yet! use /quote to add some")
     let list = ""
     for (let i = 0; i < quotes.length; i++) {
-      const line = `${i + 1}. *"${quotes[i].text}"* — **${quotes[i].author}**\n`
+      const line = `${i + 1}. *"${quotes[i].text}"* â€” **${quotes[i].author}**\n`
       if (list.length + line.length > 1800) { list += `\n*...and ${quotes.length - i} more*`; break }
       list += line
     }
-    return interaction.editReply(`**📌 server quotes**\n\n${list}`)
+    return interaction.editReply(`**ðŸ“Œ server quotes**\n\n${list}`)
   }
 
   if (commandName === "afk") {
@@ -1854,7 +1860,7 @@ return interaction.editReply(`**zeta commands** 🤍
     afkUsers.set(user.id, { reason, since: Date.now() })
     const afkPrompt = `You are Zeta. ${displayName} is going AFK with reason: "${reason}". Announce it casually to the server in one short sentence in your texting style.`
     const text = await callMistral(afkPrompt, [{ role: "user", content: "going afk" }])
-    return interaction.editReply(text || `${displayName} is going AFK — ${reason}`)
+    return interaction.editReply(text || `${displayName} is going AFK â€” ${reason}`)
   }
 
   if (commandName === "diary") {
@@ -1867,7 +1873,7 @@ return interaction.editReply(`**zeta commands** 🤍
         .filter(s => s.trim().length > 0)
         .slice(0, 20)
       if (messages.length < 5) return interaction.editReply("not enough happened today for a diary entry lol")
-      const diaryPrompt = `You are Zeta. Write a short dramatic diary entry (3-5 sentences) about what happened in the server today based on these messages. Be chaotic, funny, and a little over-the-top. Write it like a real diary — "dear diary..." style. In your casual texting voice.\n\nMessages:\n${messages.join("\n")}`
+      const diaryPrompt = `You are Zeta. Write a short dramatic diary entry (3-5 sentences) about what happened in the server today based on these messages. Be chaotic, funny, and a little over-the-top. Write it like a real diary â€” "dear diary..." style. In your casual texting voice.\n\nMessages:\n${messages.join("\n")}`
       const text = await callMistral(diaryPrompt, [{ role: "user", content: "write diary entry" }])
       return interaction.editReply(text || "today was... a day. i'm going to sleep.")
     } catch (e) { return interaction.editReply("couldn't fetch messages for the diary rn, sorry") }
@@ -1889,3 +1895,4 @@ return interaction.editReply(`**zeta commands** 🤍
 })
 
 client.login(process.env.DISCORD_TOKEN_ZETA)
+

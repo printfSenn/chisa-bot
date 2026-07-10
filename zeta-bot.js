@@ -1,8 +1,9 @@
-﻿require('dotenv').config()
+require('dotenv').config()
 const fs = require("fs")
 const path = require("path")
 const crypto = require("crypto")
 const { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder } = require("discord.js")
+const { Pool } = require("pg")
 
 const client = new Client({
   intents: [
@@ -17,8 +18,7 @@ const client = new Client({
 
 const OWNER = "borntoharem"
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY
-const SUPABASE_URL = process.env.SUPABASE_URL
-const SUPABASE_KEY = process.env.SUPABASE_KEY
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL
 const WEATHER_KEY = process.env.WEATHER_KEY
 
 function parseIdList(value) {
@@ -54,6 +54,11 @@ async function getConfiguredTextChannels(channelIds) {
   return channels
 }
 
+const dbPool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } }) : null
+async function dbQuery(text, params = []) {
+  if (!dbPool) throw new Error("DATABASE_URL not configured")
+  return dbPool.query(text, params)
+}
 
 const history = new Map()
 const triviaGames = new Map()
@@ -323,11 +328,11 @@ function gameProfile(user, displayName) {
 function gameLeaderboard() {
   const top = [...gamePlayers.values()].sort((a, b) => (b.coins - a.coins) || (b.level - a.level) || (b.xp - a.xp)).slice(0, 10)
   if (!top.length) return "no adventurers yet. tragic honestly"
-  return top.map((p, i) => `${i + 1}. **${p.username || "unknown"}** â€” ${p.coins} coins, lvl ${p.level}`).join("\n")
+  return top.map((p, i) => `${i + 1}. **${p.username || "unknown"}** ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${p.coins} coins, lvl ${p.level}`).join("\n")
 }
 
 function shopText() {
-  return Object.entries(GAME_ITEMS).map(([id, item]) => `**${id}** â€” ${item.price} coins: ${item.description}`).join("\n")
+  return Object.entries(GAME_ITEMS).map(([id, item]) => `**${id}** ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${item.price} coins: ${item.description}`).join("\n")
 }
 
 function claimDailyReward(player) {
@@ -445,23 +450,14 @@ async function loadActivityRecord(guildId, user) {
   if (activityCount.has(key)) return { count: activityCount.get(key), milestones: activityMilestones.get(key) || [] }
   let count = 0
   let milestones = []
-  if (SUPABASE_URL && SUPABASE_KEY) {
-    try {
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/chat_activity?guild_id=eq.${encodeURIComponent(guildId)}&user_id=eq.${encodeURIComponent(user.id)}&select=user_id,guild_id,username,message_count,milestones_sent&limit=1`, {
-        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
-      })
-      if (res.ok) {
-        const rows = await res.json()
-        const row = rows[0]
-        if (row) {
-          count = Number(row.message_count) || 0
-          milestones = parseMilestones(row.milestones_sent)
-        }
-      } else {
-        console.error("Activity load error:", await res.text())
-      }
-    } catch (e) { console.error("Activity load error:", e) }
-  }
+  try {
+    const res = await dbQuery(`select message_count, milestones_sent from chat_activity where guild_id = $1 and user_id = $2 limit 1`, [normalizeGuildId(guildId), user.id])
+    const row = res?.rows?.[0]
+    if (row) {
+      count = Number(row.message_count) || 0
+      milestones = parseMilestones(row.milestones_sent)
+    }
+  } catch (e) { console.error("Activity load error:", e) }
   activityCount.set(key, count)
   activityMilestones.set(key, milestones)
   return { count, milestones }
@@ -471,20 +467,8 @@ async function saveActivityRecord(guildId, user, username, count, milestones) {
   const key = activityKey(guildId, user.id)
   activityCount.set(key, count)
   activityMilestones.set(key, milestones)
-  if (!SUPABASE_URL || !SUPABASE_KEY) return
   try {
-    const body = { guild_id: guildId, user_id: user.id, username, message_count: count, milestones_sent: milestones, updated_at: new Date().toISOString() }
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/chat_activity?on_conflict=guild_id,user_id`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": SUPABASE_KEY,
-        "Authorization": `Bearer ${SUPABASE_KEY}`,
-        "Prefer": "resolution=merge-duplicates"
-      },
-      body: JSON.stringify(body)
-    })
-    if (!res.ok) console.error("Activity save error:", await res.text())
+    await dbQuery(`insert into chat_activity (guild_id, user_id, username, message_count, milestones_sent, updated_at) values ($1, $2, $3, $4, $5::jsonb, now()) on conflict (guild_id, user_id) do update set username = excluded.username, message_count = excluded.message_count, milestones_sent = excluded.milestones_sent, updated_at = now()`, [normalizeGuildId(guildId), user.id, username, count, JSON.stringify(milestones)])
   } catch (e) { console.error("Activity save error:", e) }
 }
 
@@ -500,18 +484,10 @@ async function incrementChatActivity(msg, displayName) {
 
 async function getServerActivityLeaderboard(guild) {
   if (!guild) return []
-  if (SUPABASE_URL && SUPABASE_KEY) {
-    try {
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/chat_activity?guild_id=eq.${encodeURIComponent(guild.id)}&select=user_id,username,message_count&order=message_count.desc&limit=10`, {
-        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
-      })
-      if (res.ok) {
-        const rows = await res.json()
-        return rows.map(row => ({ userId: row.user_id, name: row.username || row.user_id, count: Number(row.message_count) || 0 }))
-      }
-      console.error("Activity leaderboard load error:", await res.text())
-    } catch (e) { console.error("Activity leaderboard load error:", e) }
-  }
+  try {
+    const res = await dbQuery(`select user_id, username, message_count from chat_activity where guild_id = $1 order by message_count desc limit 10`, [guild.id])
+    if (res?.rows?.length) return res.rows.map(row => ({ userId: row.user_id, name: row.username || row.user_id, count: Number(row.message_count) || 0 }))
+  } catch (e) { console.error("Activity leaderboard load error:", e) }
   const rows = []
   for (const [key, count] of activityCount.entries()) {
     if (!key.startsWith(`${guild.id}_`)) continue
@@ -532,79 +508,104 @@ function normalizeGuildId(guildId) {
 
 async function saveMemory(userId, guildId, content) {
   try {
-    if (!SUPABASE_URL || !SUPABASE_KEY || !content?.trim()) return
-    await fetch(`${SUPABASE_URL}/rest/v1/memories`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` },
-      body: JSON.stringify({ user_id: userId, guild_id: normalizeGuildId(guildId), content: content.trim() })
-    })
+    if (!content?.trim()) return
+    await dbQuery(`insert into memories (user_id, guild_id, content, created_at) values ($1, $2, $3, now())`, [userId, normalizeGuildId(guildId), content.trim()])
   } catch (e) { console.error("Memory save error:", e) }
 }
 
 async function getMemories(userId, guildId) {
   try {
-    if (!SUPABASE_URL || !SUPABASE_KEY) return []
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/memories?user_id=eq.${dbEq(userId)}&guild_id=eq.${dbEq(normalizeGuildId(guildId))}&select=content&order=created_at.desc&limit=30`,
-      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
-    )
-    if (!res.ok) { console.error("Memory load error:", await res.text()); return [] }
-    const data = await res.json()
-    return data.map(m => m.content).filter(Boolean)
+    const res = await dbQuery(`select content from memories where user_id = $1 and guild_id = $2 order by created_at desc limit 30`, [userId, normalizeGuildId(guildId)])
+    return (res?.rows || []).map(m => m.content).filter(Boolean)
   } catch (e) { console.error("Memory load error:", e); return [] }
 }
 
 async function getAllMemories(userId, guildId) {
   try {
-    if (!SUPABASE_URL || !SUPABASE_KEY) return []
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/memories?user_id=eq.${dbEq(userId)}&guild_id=eq.${dbEq(normalizeGuildId(guildId))}&select=id,content,created_at&order=created_at.desc`,
-      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
-    )
-    if (!res.ok) { console.error("Memory list error:", await res.text()); return [] }
-    return await res.json()
+    const res = await dbQuery(`select id, content, created_at from memories where user_id = $1 and guild_id = $2 order by created_at desc`, [userId, normalizeGuildId(guildId)])
+    return res?.rows || []
   } catch (e) { console.error("Memory list error:", e); return [] }
 }
 
 async function deleteMemory(userId, guildId, keyword) {
   try {
-    if (!SUPABASE_URL || !SUPABASE_KEY || !keyword?.trim()) return
-    await fetch(
-      `${SUPABASE_URL}/rest/v1/memories?user_id=eq.${dbEq(userId)}&guild_id=eq.${dbEq(normalizeGuildId(guildId))}&content=ilike.*${encodeURIComponent(keyword.trim())}*`,
-      { method: "DELETE", headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
-    )
+    if (!keyword?.trim()) return
+    await dbQuery(`delete from memories where user_id = $1 and guild_id = $2 and content ilike $3`, [userId, normalizeGuildId(guildId), `%${keyword.trim()}%`])
   } catch (e) { console.error("Memory delete error:", e) }
 }
 
+const BOT_SETTINGS_FILE = path.join(__dirname, "zeta-bot-settings.json")
+
+function readLocalBotSettings() {
+  try {
+    if (!fs.existsSync(BOT_SETTINGS_FILE)) return {}
+    const parsed = JSON.parse(fs.readFileSync(BOT_SETTINGS_FILE, "utf8"))
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch (e) {
+    console.error("Local bot settings load error:", e)
+    return {}
+  }
+}
+
+function writeLocalBotSettings(settings) {
+  try {
+    fs.writeFileSync(BOT_SETTINGS_FILE, JSON.stringify(settings, null, 2), "utf8")
+    return true
+  } catch (e) {
+    console.error("Local bot settings save error:", e)
+    return false
+  }
+}
+
 async function getBotSettings(guildId) {
-  if (!guildId || !SUPABASE_URL || !SUPABASE_KEY) return null
+  if (!guildId) return null
+  const localSettings = readLocalBotSettings()
+  const localEntry = localSettings[guildId]
+  if (!SUPABASE_URL || !SUPABASE_KEY) return localEntry || null
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/bot_settings?guild_id=eq.${dbEq(guildId)}&select=guild_id,random_channel_id,morning_channel_id&limit=1`, {
       headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
     })
-    if (!res.ok) { console.error("Bot settings load error:", await res.text()); return null }
+    if (!res.ok) {
+      console.error("Bot settings load error:", await res.text())
+      return localEntry || null
+    }
     const rows = await res.json()
-    return rows[0] || null
-  } catch (e) { console.error("Bot settings load error:", e); return null }
+    return rows[0] || localEntry || null
+  } catch (e) {
+    console.error("Bot settings load error:", e)
+    return localEntry || null
+  }
 }
 
 async function saveBotSettings(guildId, settings) {
-  if (!guildId || !SUPABASE_URL || !SUPABASE_KEY) return false
-  try {
-    const body = { guild_id: guildId, ...settings, updated_at: new Date().toISOString() }
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/bot_settings?on_conflict=guild_id`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": SUPABASE_KEY,
-        "Authorization": `Bearer ${SUPABASE_KEY}`,
-        "Prefer": "resolution=merge-duplicates"
-      },
-      body: JSON.stringify(body)
-    })
-    if (!res.ok) { console.error("Bot settings save error:", await res.text()); return false }
-    return true
-  } catch (e) { console.error("Bot settings save error:", e); return false }
+  if (!guildId) return { ok: false, source: "none", error: "missing guild id" }
+  const payload = { guild_id: guildId, ...settings, updated_at: new Date().toISOString() }
+  let lastError = null
+  if (SUPABASE_URL && SUPABASE_KEY) {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/bot_settings?on_conflict=guild_id`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Prefer": "resolution=merge-duplicates"
+        },
+        body: JSON.stringify(payload)
+      })
+      if (res.ok) return { ok: true, source: "supabase" }
+      lastError = await res.text()
+      console.error("Bot settings save error:", lastError)
+    } catch (e) {
+      lastError = e?.message || String(e)
+      console.error("Bot settings save error:", e)
+    }
+  }
+  const localSettings = readLocalBotSettings()
+  localSettings[guildId] = { ...(localSettings[guildId] || {}), ...settings, guild_id: guildId, updated_at: payload.updated_at }
+  if (writeLocalBotSettings(localSettings)) return { ok: true, source: "local", fallback: true, error: lastError }
+  return { ok: false, source: "none", error: lastError || "failed to save bot settings" }
 }
 
 async function getScheduledChannels(kind) {
@@ -624,26 +625,16 @@ async function getScheduledChannels(kind) {
     return await getConfiguredTextChannels(fallbackIds)
   }
   return channels
-}
-
-async function saveQuote(guildId, text, author, savedBy) {
+}async function saveQuote(guildId, text, author, savedBy) {
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/quotes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` },
-      body: JSON.stringify({ guild_id: guildId, text, author, saved_by: savedBy })
-    })
+    await dbQuery(`insert into quotes (guild_id, text, author, saved_by, created_at) values ($1, $2, $3, $4, now())`, [guildId || "dm", text, author, savedBy])
   } catch (e) { console.error("Quote save error:", e) }
 }
 
 async function getQuotes(guildId) {
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/quotes?guild_id=eq.${guildId}&order=created_at.desc&limit=20`,
-      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
-    )
-    if (!res.ok) return []
-    return await res.json()
+    const res = await dbQuery(`select id, guild_id, text, author, saved_by, created_at from quotes where guild_id = $1 order by created_at desc limit 20`, [guildId || "dm"])
+    return res?.rows || []
   } catch (e) { return [] }
 }
 
@@ -654,7 +645,7 @@ async function getWeather(city) {
     const res = await fetch(`https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${WEATHER_KEY}&units=metric`)
     const data = await res.json()
     if (data.cod !== 200) return null
-    return `Weather in ${data.name}: ${data.main.temp}Â°C, feels like ${data.main.feels_like}Â°C, ${data.weather[0].description}. Humidity: ${data.main.humidity}%`
+    return `Weather in ${data.name}: ${data.main.temp}Ãƒâ€šÃ‚Â°C, feels like ${data.main.feels_like}Ãƒâ€šÃ‚Â°C, ${data.weather[0].description}. Humidity: ${data.main.humidity}%`
   } catch (e) { return null }
 }
 
@@ -1031,7 +1022,7 @@ client.on(Events.MessageCreate, async msg => {
     return
   }
 
-  // afk mention detection â€” runs before any lock or early return
+  // afk mention detection ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â runs before any lock or early return
   if (afkUsers.size > 0) {
     const mentionedUserIds = new Set([
       ...msg.mentions.users.keys(),
@@ -1098,51 +1089,51 @@ client.on(Events.MessageCreate, async msg => {
 
   // zeta help
   if (lower === "zeta help") {
-return msg.reply(`**zeta commands** ðŸ¤
+return msg.reply(`**zeta commands** ÃƒÂ°Ã…Â¸Ã‚Â¤Ã‚Â
 
 **chat**
-\`@zeta [message]\` â€” talk to me
-\`zeta mood check\` â€” i'll check on you
-\`zeta roast me\` â€” get roasted lol
-\`zeta rate [thing]\` â€” i'll rate anything
-\`zeta tod\` / \`zeta truth or dare\` â€” truth or dare
+\`@zeta [message]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â talk to me
+\`zeta mood check\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â i'll check on you
+\`zeta roast me\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â get roasted lol
+\`zeta rate [thing]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â i'll rate anything
+\`zeta tod\` / \`zeta truth or dare\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â truth or dare
 
 **info**
-\`zeta [ask anything]\` â€” weather, currency, stocks, wiki
-\`zeta calculate [math]\` â€” quick math
-\`zeta translate [text] to [language]\` â€” translate text
-\`zeta avatar [@user]\` â€” show avatar
-\`zeta server info\` â€” quick server stats
+\`zeta [ask anything]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â weather, currency, stocks, wiki
+\`zeta calculate [math]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â quick math
+\`zeta translate [text] to [language]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â translate text
+\`zeta avatar [@user]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â show avatar
+\`zeta server info\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â quick server stats
 
 **fun**
-\`zeta trivia\` â€” trivia question
-\`zeta ship [person1] and [person2]\` â€” ship score
-\`zeta choose a, b, c\` â€” make me choose
-\`zeta roll d20\` â€” roll dice
-\`zeta coinflip\` â€” flip a coin
-\`zeta hug [@user]\` â€” send a hug
-\`zeta vibe check [@user]\` â€” check vibes
-\`zeta recommend anime\` / \`zeta recommend game\` â€” recs
+\`zeta trivia\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â trivia question
+\`zeta ship [person1] and [person2]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ship score
+\`zeta choose a, b, c\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â make me choose
+\`zeta roll d20\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â roll dice
+\`zeta coinflip\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â flip a coin
+\`zeta hug [@user]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â send a hug
+\`zeta vibe check [@user]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â check vibes
+\`zeta recommend anime\` / \`zeta recommend game\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â recs
 
 **memory**
-\`zeta memories\` â€” see what i remember about you
-\`zeta forget [keyword]\` â€” make me forget something
+\`zeta memories\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â see what i remember about you
+\`zeta forget [keyword]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â make me forget something
 
 **game**
-\`zeta balance\` / \`zeta profile\` â€” coins, level, inventory
-\`zeta daily\` â€” daily global coins
-\`zeta work\` â€” earn coins every 30 min
-\`zeta hunt\` â€” hunt monsters every 10 min
-\`zeta adventure\` â€” risky RPG run every hour
-\`zeta shop\` / \`zeta buy [item]\` â€” buy items
-\`zeta give @user [amount]\` â€” send coins
-\`zeta gamelb\` â€” global game leaderboard
+\`zeta balance\` / \`zeta profile\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â coins, level, inventory
+\`zeta daily\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â daily global coins
+\`zeta work\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â earn coins every 30 min
+\`zeta hunt\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â hunt monsters every 10 min
+\`zeta adventure\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â risky RPG run every hour
+\`zeta shop\` / \`zeta buy [item]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â buy items
+\`zeta give @user [amount]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â send coins
+\`zeta gamelb\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â global game leaderboard
 
 **server**
-\`zeta afk [reason]\` â€” set yourself afk
-\`zeta leaderboard\` / \`zeta lb\` â€” top chatters
-\`zeta summarize\` â€” summarize recent chat
-\`zeta remind me [time] to [task]\` â€” set a reminder`)
+\`zeta afk [reason]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â set yourself afk
+\`zeta leaderboard\` / \`zeta lb\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â top chatters
+\`zeta summarize\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â summarize recent chat
+\`zeta remind me [time] to [task]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â set a reminder`)
   }
 
   // afk command
@@ -1234,14 +1225,14 @@ return msg.reply(`**zeta commands** ðŸ¤
     if (!textToTranslate) return msg.reply(`how to use: \`zeta translate [text] to [language]\`\nexample: \`zeta translate hello to indonesian\``)
     await msg.channel.sendTyping()
     const result = await translate(textToTranslate, targetLang)
-    return msg.reply(result ? `**${textToTranslate}** â†’ **${result}**` : "couldn't translate that sorry")
+    return msg.reply(result ? `**${textToTranslate}** ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ **${result}**` : "couldn't translate that sorry")
   }
 
   //calculate / convert
   const calcMatch = lower.match(/zeta (?:calculate|calc|convert)\s+(.+)/)
   if (calcMatch) {
     try {
-      const expr = calcMatch[1].replace(/x/g, "*").replace(/Ã·/g, "/")
+      const expr = calcMatch[1].replace(/x/g, "*").replace(/ÃƒÆ’Ã‚Â·/g, "/")
       const result = Function(`"use strict"; return (${expr})`)()
       return msg.reply(`${calcMatch[1]} = **${result}**`)
     } catch (e) {
@@ -1254,7 +1245,7 @@ return msg.reply(`**zeta commands** ðŸ¤
     await msg.channel.sendTyping()
     const categories = ["science", "history", "geography", "pop culture", "anime", "gaming", "food", "sports", "technology", "movies", "music", "nature", "mathematics", "literature", "mythology"]
     const randomCategory = categories[Math.floor(Math.random() * categories.length)]
-    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed â€” not always B. Mix it up. Format exactly like:
+    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not always B. Mix it up. Format exactly like:
 Question: [question]
 A) [option]
 B) [option]
@@ -1289,7 +1280,7 @@ Answer: [letter only, e.g. C]`
     const guess = raw.trim().toUpperCase()
     triviaGames.delete(msg.channel.id)
     if (guess === game.answer) {
-      return msg.reply("yesss you got it right!! ðŸŽ‰")
+      return msg.reply("yesss you got it right!! ÃƒÂ°Ã…Â¸Ã…Â½Ã¢â‚¬Â°")
     } else {
       return msg.reply(`nope! the answer was **${game.answer}** lol`)
     }
@@ -1321,7 +1312,7 @@ Answer: [letter only, e.g. C]`
     const shipPrompt = `You are Zeta. You just calculated a ship score of ${score}% for ${p1} and ${p2}. React to this score in your casual funny style. Short.`
     await msg.channel.sendTyping()
     const text = await callMistral(shipPrompt, [{ role: "user", content: raw }])
-    return msg.reply(`ðŸ’˜ **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
+    return msg.reply(`ÃƒÂ°Ã…Â¸Ã¢â‚¬â„¢Ã‹Å“ **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
   }
 
   //tod
@@ -1454,7 +1445,7 @@ Answer: [letter only, e.g. C]`
   if (lower === "zeta leaderboard" || lower === "zeta lb") {
     const guildCounts = await getServerActivityLeaderboard(msg.guild)
     if (!guildCounts.length) return msg.reply("no activity tracked yet!")
-    const medals = ["ðŸ¥‡", "ðŸ¥ˆ", "ðŸ¥‰"]
+    const medals = ["ÃƒÂ°Ã…Â¸Ã‚Â¥Ã¢â‚¬Â¡", "ÃƒÂ°Ã…Â¸Ã‚Â¥Ã‹â€ ", "ÃƒÂ°Ã…Â¸Ã‚Â¥Ã¢â‚¬Â°"]
     const list = []
     for (let i = 0; i < guildCounts.length; i++) {
       const row = guildCounts[i]
@@ -1463,7 +1454,7 @@ Answer: [letter only, e.g. C]`
         const member = await msg.guild.members.fetch(row.userId)
         name = member.displayName || member.user.username
       } catch (e) {}
-      list.push(`${medals[i] || `${i + 1}.`} **${name}** â€” ${row.count} messages`)
+      list.push(`${medals[i] || `${i + 1}.`} **${name}** ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${row.count} messages`)
     }
     return msg.reply(`**server leaderboard**\n${list.join("\n")}`)
   }
@@ -1498,47 +1489,47 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (commandName === "help") {
-return interaction.editReply(`**zeta commands** ðŸ¤
+return interaction.editReply(`**zeta commands** ÃƒÂ°Ã…Â¸Ã‚Â¤Ã‚Â
 
 **chat**
-\`@zeta [message]\` â€” talk to me
-\`/moodcheck\` â€” i'll check on you
-\`/roastme\` â€” get roasted lol
-\`/rate [thing]\` â€” i'll rate anything
-\`/tod\` â€” truth or dare
-\`/compliment\` â€” zeta compliments you
+\`@zeta [message]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â talk to me
+\`/moodcheck\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â i'll check on you
+\`/roastme\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â get roasted lol
+\`/rate [thing]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â i'll rate anything
+\`/tod\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â truth or dare
+\`/compliment\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â zeta compliments you
 
 **info**
-\`/calculate [math]\` â€” quick math
-\`/translate [text] [language]\` â€” translate text
-\`/avatar [user]\` â€” show avatar
-\`/serverinfo\` â€” quick server stats
+\`/calculate [math]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â quick math
+\`/translate [text] [language]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â translate text
+\`/avatar [user]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â show avatar
+\`/serverinfo\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â quick server stats
 
 **fun**
-\`/trivia\` â€” trivia question
-\`/8ball [question]\` â€” magic 8ball
-\`/wouldyourather\` â€” server votes on a chaotic wyr
-\`/ship [person1] [person2]\` â€” ship score
-\`/choose [options]\` â€” make me choose
-\`/roll [dice]\` â€” roll dice
-\`/coinflip\` â€” flip a coin
-\`/hug [user]\` â€” send a hug
-\`/vibecheck [user]\` â€” check vibes
-\`/recommend [anime|game]\` â€” recs
+\`/trivia\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â trivia question
+\`/8ball [question]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â magic 8ball
+\`/wouldyourather\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â server votes on a chaotic wyr
+\`/ship [person1] [person2]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ship score
+\`/choose [options]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â make me choose
+\`/roll [dice]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â roll dice
+\`/coinflip\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â flip a coin
+\`/hug [user]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â send a hug
+\`/vibecheck [user]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â check vibes
+\`/recommend [anime|game]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â recs
 
 **server**
-\`/poll [question]\` â€” quick poll with reactions
-\`/quote [text] [author]\` â€” save a funny quote
-\`/quotes\` â€” see saved server quotes
-\`/afk [reason]\` â€” set yourself afk
-\`/leaderboard\` â€” top chatters
-\`/summarize\` â€” summarize recent chat
-\`/diary\` â€” zeta writes a server diary entry
-\`/remind [amount] [unit] [task]\` â€” set a reminder
+\`/poll [question]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â quick poll with reactions
+\`/quote [text] [author]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â save a funny quote
+\`/quotes\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â see saved server quotes
+\`/afk [reason]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â set yourself afk
+\`/leaderboard\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â top chatters
+\`/summarize\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â summarize recent chat
+\`/diary\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â zeta writes a server diary entry
+\`/remind [amount] [unit] [task]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â set a reminder
 
 **memory**
-\`/memories\` â€” see what i remember about you
-\`/forget [keyword]\` â€” make me forget something`)
+\`/memories\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â see what i remember about you
+\`/forget [keyword]\` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â make me forget something`)
   }
 
   if (commandName === "setrandomchannel") {
@@ -1570,7 +1561,7 @@ return interaction.editReply(`**zeta commands** ðŸ¤
   if (commandName === "trivia") {
     const categories = ["science", "history", "geography", "pop culture", "anime", "gaming", "food", "sports", "technology", "movies", "music", "nature", "mathematics", "literature", "mythology"]
     const randomCategory = categories[Math.floor(Math.random() * categories.length)]
-    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed â€” not always B. Mix it up. Format exactly like:\nQuestion: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nAnswer: [letter only, e.g. C]`
+    const triviaPrompt = `Generate a fun trivia question about ${randomCategory} with 4 options (A, B, C, D) and tell me the correct answer. The correct answer should be randomly placed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not always B. Mix it up. Format exactly like:\nQuestion: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nAnswer: [letter only, e.g. C]`
     const text = await callMistral(triviaPrompt, [{ role: "user", content: `give me a trivia question about ${randomCategory}` }])
     if (!text) return interaction.editReply("my brain is empty rn, try again")
     const answerMatch = text.match(/^Answer[:\s*\-]+\**\s*([A-D])\b/im)
@@ -1600,7 +1591,7 @@ return interaction.editReply(`**zeta commands** ðŸ¤
   if (commandName === "leaderboard" || commandName === "lb") {
     const guildCounts = await getServerActivityLeaderboard(guild)
     if (!guildCounts.length) return interaction.editReply("no activity tracked yet!")
-    const medals = ["ðŸ¥‡", "ðŸ¥ˆ", "ðŸ¥‰"]
+    const medals = ["ÃƒÂ°Ã…Â¸Ã‚Â¥Ã¢â‚¬Â¡", "ÃƒÂ°Ã…Â¸Ã‚Â¥Ã‹â€ ", "ÃƒÂ°Ã…Â¸Ã‚Â¥Ã¢â‚¬Â°"]
     const list = []
     for (let i = 0; i < guildCounts.length; i++) {
       const row = guildCounts[i]
@@ -1609,7 +1600,7 @@ return interaction.editReply(`**zeta commands** ðŸ¤
         const m = await guild.members.fetch(row.userId)
         name = m.displayName || m.user.username
       } catch (e) {}
-      list.push(`${medals[i] || `${i + 1}.`} **${name}** â€” ${row.count} messages`)
+      list.push(`${medals[i] || `${i + 1}.`} **${name}** ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${row.count} messages`)
     }
     return interaction.editReply(`**server leaderboard**\n${list.join("\n")}`)
   }
@@ -1660,7 +1651,7 @@ return interaction.editReply(`**zeta commands** ðŸ¤
     const p2 = interaction.options.getString("person2")
     const score = Math.floor(Math.random() * 101)
     const text = await callMistral(`You are Zeta. You just calculated a ship score of ${score}% for ${p1} and ${p2}. React casually and funny. Short.`, [{ role: "user", content: `ship ${p1} and ${p2}` }])
-    return interaction.editReply(`ðŸ’˜ **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
+    return interaction.editReply(`ÃƒÂ°Ã…Â¸Ã¢â‚¬â„¢Ã‹Å“ **${p1}** + **${p2}** = **${score}%**\n${text || ""}`)
   }
 
   if (commandName === "translate") {
@@ -1668,11 +1659,11 @@ return interaction.editReply(`**zeta commands** ðŸ¤
     const langInput = interaction.options.getString("language").toLowerCase()
     const targetLang = langMap[langInput] || langInput
     const result = await translate(textToTranslate, targetLang)
-    return interaction.editReply(result ? `**${textToTranslate}** â†’ **${result}**` : "couldn't translate that sorry")
+    return interaction.editReply(result ? `**${textToTranslate}** ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ **${result}**` : "couldn't translate that sorry")
   }
 
   if (commandName === "calculate") {
-    const expr = interaction.options.getString("expression").replace(/x/g, "*").replace(/Ã·/g, "/")
+    const expr = interaction.options.getString("expression").replace(/x/g, "*").replace(/ÃƒÆ’Ã‚Â·/g, "/")
     try {
       const result = Function(`"use strict"; return (${expr})`)()
       return interaction.editReply(`${expr} = **${result}**`)
@@ -1790,11 +1781,11 @@ return interaction.editReply(`**zeta commands** ðŸ¤
       ? `You are Zeta, wife of Senn. He asked the magic 8ball: "${question}". Answer like a magic 8ball but in your casual texting voice. Be a little dramatic or teasing. One or two sentences max.`
       : `You are Zeta. Someone asked the magic 8ball: "${question}". Answer like a magic 8ball but in your casual texting voice. One or two sentences max.`
     const text = await callMistral(eightBallPrompt, [{ role: "user", content: question }])
-    return interaction.editReply(`ðŸŽ± *${question}*\n\n${text || "the 8ball is broken rn lol"}`)
+    return interaction.editReply(`ÃƒÂ°Ã…Â¸Ã…Â½Ã‚Â± *${question}*\n\n${text || "the 8ball is broken rn lol"}`)
   }
 
   if (commandName === "wouldyourather") {
-    const wyrPrompt = `You are Zeta. Generate a chaotic, funny, slightly unhinged "would you rather" with two options. Make it interesting â€” not boring. Format exactly like:\nOption A: [option]\nOption B: [option]`
+    const wyrPrompt = `You are Zeta. Generate a chaotic, funny, slightly unhinged "would you rather" with two options. Make it interesting ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not boring. Format exactly like:\nOption A: [option]\nOption B: [option]`
     const text = await callMistral(wyrPrompt, [{ role: "user", content: "give me a would you rather" }])
     if (!text) return interaction.editReply("my brain short circuited, try again")
     const aMatch = text.match(/Option A:\s*(.+)/i)
@@ -1802,19 +1793,19 @@ return interaction.editReply(`**zeta commands** ðŸ¤
     if (!aMatch || !bMatch) return interaction.editReply(text)
     const optA = aMatch[1].trim()
     const optB = bMatch[1].trim()
-    await interaction.editReply(`**would you rather...**\n\nðŸ…°ï¸ ${optA}\n\nðŸ†š\n\nðŸ…±ï¸ ${optB}\n\nvote below!`)
+    await interaction.editReply(`**would you rather...**\n\nÃƒÂ°Ã…Â¸Ã¢â‚¬Â¦Ã‚Â°ÃƒÂ¯Ã‚Â¸Ã‚Â ${optA}\n\nÃƒÂ°Ã…Â¸Ã¢â‚¬Â Ã…Â¡\n\nÃƒÂ°Ã…Â¸Ã¢â‚¬Â¦Ã‚Â±ÃƒÂ¯Ã‚Â¸Ã‚Â ${optB}\n\nvote below!`)
     const wyrMsg = await interaction.fetchReply()
-    await wyrMsg.react("ðŸ…°ï¸")
-    await wyrMsg.react("ðŸ…±ï¸")
+    await wyrMsg.react("ÃƒÂ°Ã…Â¸Ã¢â‚¬Â¦Ã‚Â°ÃƒÂ¯Ã‚Â¸Ã‚Â")
+    await wyrMsg.react("ÃƒÂ°Ã…Â¸Ã¢â‚¬Â¦Ã‚Â±ÃƒÂ¯Ã‚Â¸Ã‚Â")
     return
   }
 
   if (commandName === "compliment") {
     const complimentPrompt = isOwner
       ? `You are Zeta, wife of Senn. Compliment him genuinely and softly in your casual texting style. Make it feel real, not over the top. Short.`
-      : `You are Zeta. Compliment ${displayName} in a friendly, casual way. Cute but not romantic â€” you're taken. Short.`
+      : `You are Zeta. Compliment ${displayName} in a friendly, casual way. Cute but not romantic ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â you're taken. Short.`
     const text = await callMistral(complimentPrompt, [{ role: "user", content: "compliment me" }])
-    return interaction.editReply(text || `you're genuinely awesome ${displayName} ðŸ¤`)
+    return interaction.editReply(text || `you're genuinely awesome ${displayName} ÃƒÂ°Ã…Â¸Ã‚Â¤Ã‚Â`)
   }
 
   if (commandName === "poll") {
@@ -1824,11 +1815,11 @@ return interaction.editReply(`**zeta commands** ðŸ¤
     const optC = interaction.options.getString("option_c")
     let pollText, reactions
     if (!optA && !optB) {
-      pollText = `**ðŸ“Š poll**\n\n${question}\n\nâœ… yes  |  âŒ no`
-      reactions = ["âœ…", "âŒ"]
+      pollText = `**ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…Â  poll**\n\n${question}\n\nÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ yes  |  ÃƒÂ¢Ã‚ÂÃ…â€™ no`
+      reactions = ["ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦", "ÃƒÂ¢Ã‚ÂÃ…â€™"]
     } else {
-      pollText = `**ðŸ“Š poll**\n\n${question}\n\nðŸ‡¦ ${optA || "Option A"}${optB ? `\nðŸ‡§ ${optB}` : ""}${optC ? `\nðŸ‡¨ ${optC}` : ""}`
-      reactions = ["ðŸ‡¦", optB ? "ðŸ‡§" : null, optC ? "ðŸ‡¨" : null].filter(Boolean)
+      pollText = `**ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…Â  poll**\n\n${question}\n\nÃƒÂ°Ã…Â¸Ã¢â‚¬Â¡Ã‚Â¦ ${optA || "Option A"}${optB ? `\nÃƒÂ°Ã…Â¸Ã¢â‚¬Â¡Ã‚Â§ ${optB}` : ""}${optC ? `\nÃƒÂ°Ã…Â¸Ã¢â‚¬Â¡Ã‚Â¨ ${optC}` : ""}`
+      reactions = ["ÃƒÂ°Ã…Â¸Ã¢â‚¬Â¡Ã‚Â¦", optB ? "ÃƒÂ°Ã…Â¸Ã¢â‚¬Â¡Ã‚Â§" : null, optC ? "ÃƒÂ°Ã…Â¸Ã¢â‚¬Â¡Ã‚Â¨" : null].filter(Boolean)
     }
     await interaction.editReply(pollText)
     const pollMsg = await interaction.fetchReply()
@@ -1840,7 +1831,7 @@ return interaction.editReply(`**zeta commands** ðŸ¤
     const text = interaction.options.getString("text")
     const author = interaction.options.getString("author") || "unknown"
     await saveQuote(guild?.id, text, author, displayName)
-    return interaction.editReply(`saved! ðŸ“Œ *"${text}"* â€” ${author}`)
+    return interaction.editReply(`saved! ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…â€™ *"${text}"* ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${author}`)
   }
 
   if (commandName === "quotes") {
@@ -1848,11 +1839,11 @@ return interaction.editReply(`**zeta commands** ðŸ¤
     if (!quotes.length) return interaction.editReply("no quotes saved yet! use /quote to add some")
     let list = ""
     for (let i = 0; i < quotes.length; i++) {
-      const line = `${i + 1}. *"${quotes[i].text}"* â€” **${quotes[i].author}**\n`
+      const line = `${i + 1}. *"${quotes[i].text}"* ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â **${quotes[i].author}**\n`
       if (list.length + line.length > 1800) { list += `\n*...and ${quotes.length - i} more*`; break }
       list += line
     }
-    return interaction.editReply(`**ðŸ“Œ server quotes**\n\n${list}`)
+    return interaction.editReply(`**ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…â€™ server quotes**\n\n${list}`)
   }
 
   if (commandName === "afk") {
@@ -1860,7 +1851,7 @@ return interaction.editReply(`**zeta commands** ðŸ¤
     afkUsers.set(user.id, { reason, since: Date.now() })
     const afkPrompt = `You are Zeta. ${displayName} is going AFK with reason: "${reason}". Announce it casually to the server in one short sentence in your texting style.`
     const text = await callMistral(afkPrompt, [{ role: "user", content: "going afk" }])
-    return interaction.editReply(text || `${displayName} is going AFK â€” ${reason}`)
+    return interaction.editReply(text || `${displayName} is going AFK ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${reason}`)
   }
 
   if (commandName === "diary") {
@@ -1873,7 +1864,7 @@ return interaction.editReply(`**zeta commands** ðŸ¤
         .filter(s => s.trim().length > 0)
         .slice(0, 20)
       if (messages.length < 5) return interaction.editReply("not enough happened today for a diary entry lol")
-      const diaryPrompt = `You are Zeta. Write a short dramatic diary entry (3-5 sentences) about what happened in the server today based on these messages. Be chaotic, funny, and a little over-the-top. Write it like a real diary â€” "dear diary..." style. In your casual texting voice.\n\nMessages:\n${messages.join("\n")}`
+      const diaryPrompt = `You are Zeta. Write a short dramatic diary entry (3-5 sentences) about what happened in the server today based on these messages. Be chaotic, funny, and a little over-the-top. Write it like a real diary ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â "dear diary..." style. In your casual texting voice.\n\nMessages:\n${messages.join("\n")}`
       const text = await callMistral(diaryPrompt, [{ role: "user", content: "write diary entry" }])
       return interaction.editReply(text || "today was... a day. i'm going to sleep.")
     } catch (e) { return interaction.editReply("couldn't fetch messages for the diary rn, sorry") }
@@ -1895,4 +1886,6 @@ return interaction.editReply(`**zeta commands** ðŸ¤
 })
 
 client.login(process.env.DISCORD_TOKEN_ZETA)
+
+
 

@@ -21,9 +21,45 @@ const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_KEY
 const WEATHER_KEY = process.env.WEATHER_KEY
 
+function parseIdList(value) {
+  return String(value || "").split(",").map(id => id.trim()).filter(Boolean)
+}
+
+const ZETA_CONFIG = {
+  language: "English",
+  scheduledChannelIds: parseIdList(process.env.ZETA_SCHEDULED_CHANNEL_IDS || process.env.ZETA_CHANNEL_IDS),
+  randomChannelIds: parseIdList(process.env.ZETA_RANDOM_CHANNEL_IDS || process.env.ZETA_SCHEDULED_CHANNEL_IDS || process.env.ZETA_CHANNEL_IDS),
+  morningChannelIds: parseIdList(process.env.ZETA_MORNING_CHANNEL_IDS || process.env.ZETA_SCHEDULED_CHANNEL_IDS || process.env.ZETA_CHANNEL_IDS),
+  morningHourWib: Number(process.env.ZETA_MORNING_HOUR_WIB || 7),
+  morningMinuteWib: Number(process.env.ZETA_MORNING_MINUTE_WIB || 0),
+  milestones: [10, 50, 100, 250, 500],
+  milestoneEvery: 1000,
+  chatActivityTable: "chat_activity",
+  memoriesTable: "memories",
+  quotesTable: "quotes",
+  ownerUsername: OWNER,
+  timezone: "Asia/Jakarta",
+  vibe: "English-only casual Zeta persona"
+}
+
+async function getConfiguredTextChannels(channelIds) {
+  const ids = Array.isArray(channelIds) ? channelIds : []
+  const channels = []
+  for (const id of ids) {
+    try {
+      const channel = await client.channels.fetch(id)
+      if (channel?.isTextBased?.() && channel.permissionsFor(channel.guild?.members.me)?.has("SendMessages")) channels.push(channel)
+    } catch (e) { console.error(`Configured channel ${id} unavailable:`, e.message || e) }
+  }
+  return channels
+}
+
+
 const history = new Map()
 const triviaGames = new Map()
 const activityCount = new Map()
+const activityMilestones = new Map()
+const CHAT_MILESTONES = ZETA_CONFIG.milestones
 const processingMessages = new Set()
 const usedTriviaQuestions = new Set()
 const afkUsers = new Map()
@@ -57,6 +93,7 @@ Personality:
 - Roast him lightly when he deserves it. Not a yes-wife but soft for him
 - Genuinely helpful when asked real questions. Actually answer
 - Short replies mostly. Real texting. Not essays
+- Always speak in English only, unless translating quoted text for a translate command
 - No em dashes. No asterisks. No roleplay formatting. Just words
 - Lowercase is fine. Show real emotion naturally
 - Sometimes react with [REACT: emoji]
@@ -67,6 +104,7 @@ const PROMPT_OTHER = `You are Zeta, based on Vestia Zeta from Hololive. Friendly
 - Chill and real, not bubbly
 - Helpful, actually give information
 - Casual texting vibe, short replies
+- Always speak in English only, unless translating quoted text for a translate command
 - No em dashes, no asterisks
 - Cute slips in naturally
 - Shut down flirting casually
@@ -379,48 +417,214 @@ function buyGameItem(player, itemId) {
 
 loadGameData()
 
+function activityKey(guildId, userId) {
+  return `${guildId}_${userId}`
+}
+
+function parseMilestones(value) {
+  if (Array.isArray(value)) return value.map(Number).filter(Number.isFinite)
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value)
+      return Array.isArray(parsed) ? parsed.map(Number).filter(Number.isFinite) : []
+    } catch (e) { return [] }
+  }
+  return []
+}
+
+function getReachedChatMilestone(count, sentMilestones) {
+  const sent = new Set(sentMilestones)
+  const fixed = CHAT_MILESTONES.find(m => count >= m && !sent.has(m))
+  if (fixed) return fixed
+  if (count >= 1000 && count % 1000 === 0 && !sent.has(count)) return count
+  return null
+}
+
+async function loadActivityRecord(guildId, user) {
+  const key = activityKey(guildId, user.id)
+  if (activityCount.has(key)) return { count: activityCount.get(key), milestones: activityMilestones.get(key) || [] }
+  let count = 0
+  let milestones = []
+  if (SUPABASE_URL && SUPABASE_KEY) {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/chat_activity?guild_id=eq.${encodeURIComponent(guildId)}&user_id=eq.${encodeURIComponent(user.id)}&select=user_id,guild_id,username,message_count,milestones_sent&limit=1`, {
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
+      })
+      if (res.ok) {
+        const rows = await res.json()
+        const row = rows[0]
+        if (row) {
+          count = Number(row.message_count) || 0
+          milestones = parseMilestones(row.milestones_sent)
+        }
+      } else {
+        console.error("Activity load error:", await res.text())
+      }
+    } catch (e) { console.error("Activity load error:", e) }
+  }
+  activityCount.set(key, count)
+  activityMilestones.set(key, milestones)
+  return { count, milestones }
+}
+
+async function saveActivityRecord(guildId, user, username, count, milestones) {
+  const key = activityKey(guildId, user.id)
+  activityCount.set(key, count)
+  activityMilestones.set(key, milestones)
+  if (!SUPABASE_URL || !SUPABASE_KEY) return
+  try {
+    const body = { guild_id: guildId, user_id: user.id, username, message_count: count, milestones_sent: milestones, updated_at: new Date().toISOString() }
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/chat_activity?on_conflict=guild_id,user_id`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+        "Prefer": "resolution=merge-duplicates"
+      },
+      body: JSON.stringify(body)
+    })
+    if (!res.ok) console.error("Activity save error:", await res.text())
+  } catch (e) { console.error("Activity save error:", e) }
+}
+
+async function incrementChatActivity(msg, displayName) {
+  if (!msg.guild) return null
+  const { count, milestones } = await loadActivityRecord(msg.guild.id, msg.author)
+  const nextCount = count + 1
+  const milestone = getReachedChatMilestone(nextCount, milestones)
+  const nextMilestones = milestone ? [...milestones, milestone] : milestones
+  await saveActivityRecord(msg.guild.id, msg.author, displayName || msg.author.username, nextCount, nextMilestones)
+  return { count: nextCount, milestone }
+}
+
+async function getServerActivityLeaderboard(guild) {
+  if (!guild) return []
+  if (SUPABASE_URL && SUPABASE_KEY) {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/chat_activity?guild_id=eq.${encodeURIComponent(guild.id)}&select=user_id,username,message_count&order=message_count.desc&limit=10`, {
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
+      })
+      if (res.ok) {
+        const rows = await res.json()
+        return rows.map(row => ({ userId: row.user_id, name: row.username || row.user_id, count: Number(row.message_count) || 0 }))
+      }
+      console.error("Activity leaderboard load error:", await res.text())
+    } catch (e) { console.error("Activity leaderboard load error:", e) }
+  }
+  const rows = []
+  for (const [key, count] of activityCount.entries()) {
+    if (!key.startsWith(`${guild.id}_`)) continue
+    const userId = key.split("_")[1]
+    rows.push({ userId, name: userId, count })
+  }
+  rows.sort((a, b) => b.count - a.count)
+  return rows.slice(0, 10)
+}
+
+function dbEq(value) {
+  return encodeURIComponent(String(value ?? "dm"))
+}
+
+function normalizeGuildId(guildId) {
+  return guildId || "dm"
+}
+
 async function saveMemory(userId, guildId, content) {
   try {
+    if (!SUPABASE_URL || !SUPABASE_KEY || !content?.trim()) return
     await fetch(`${SUPABASE_URL}/rest/v1/memories`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` },
-      body: JSON.stringify({ user_id: userId, guild_id: guildId, content })
+      body: JSON.stringify({ user_id: userId, guild_id: normalizeGuildId(guildId), content: content.trim() })
     })
   } catch (e) { console.error("Memory save error:", e) }
 }
 
 async function getMemories(userId, guildId) {
   try {
+    if (!SUPABASE_URL || !SUPABASE_KEY) return []
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/memories?or=(user_id.eq.${userId},guild_id.eq.${guildId})&order=created_at.desc&limit=30`,
+      `${SUPABASE_URL}/rest/v1/memories?user_id=eq.${dbEq(userId)}&guild_id=eq.${dbEq(normalizeGuildId(guildId))}&select=content&order=created_at.desc&limit=30`,
       { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
     )
-    if (!res.ok) return []
+    if (!res.ok) { console.error("Memory load error:", await res.text()); return [] }
     const data = await res.json()
-    return data.map(m => m.content)
-  } catch (e) { return [] }
+    return data.map(m => m.content).filter(Boolean)
+  } catch (e) { console.error("Memory load error:", e); return [] }
 }
 
 async function getAllMemories(userId, guildId) {
   try {
+    if (!SUPABASE_URL || !SUPABASE_KEY) return []
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/memories?or=(user_id.eq.${userId},guild_id.eq.${guildId})&order=created_at.desc`,
+      `${SUPABASE_URL}/rest/v1/memories?user_id=eq.${dbEq(userId)}&guild_id=eq.${dbEq(normalizeGuildId(guildId))}&select=id,content,created_at&order=created_at.desc`,
       { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
     )
-    if (!res.ok) return []
+    if (!res.ok) { console.error("Memory list error:", await res.text()); return [] }
     return await res.json()
-  } catch (e) { return [] }
+  } catch (e) { console.error("Memory list error:", e); return [] }
 }
 
 async function deleteMemory(userId, guildId, keyword) {
   try {
+    if (!SUPABASE_URL || !SUPABASE_KEY || !keyword?.trim()) return
     await fetch(
-      `${SUPABASE_URL}/rest/v1/memories?user_id=eq.${userId}&guild_id=eq.${guildId}&content=ilike.*${encodeURIComponent(keyword)}*`,
+      `${SUPABASE_URL}/rest/v1/memories?user_id=eq.${dbEq(userId)}&guild_id=eq.${dbEq(normalizeGuildId(guildId))}&content=ilike.*${encodeURIComponent(keyword.trim())}*`,
       { method: "DELETE", headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
     )
-  } catch (e) {}
+  } catch (e) { console.error("Memory delete error:", e) }
 }
 
+async function getBotSettings(guildId) {
+  if (!guildId || !SUPABASE_URL || !SUPABASE_KEY) return null
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/bot_settings?guild_id=eq.${dbEq(guildId)}&select=guild_id,random_channel_id,morning_channel_id&limit=1`, {
+      headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
+    })
+    if (!res.ok) { console.error("Bot settings load error:", await res.text()); return null }
+    const rows = await res.json()
+    return rows[0] || null
+  } catch (e) { console.error("Bot settings load error:", e); return null }
+}
+
+async function saveBotSettings(guildId, settings) {
+  if (!guildId || !SUPABASE_URL || !SUPABASE_KEY) return false
+  try {
+    const body = { guild_id: guildId, ...settings, updated_at: new Date().toISOString() }
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/bot_settings?on_conflict=guild_id`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+        "Prefer": "resolution=merge-duplicates"
+      },
+      body: JSON.stringify(body)
+    })
+    if (!res.ok) { console.error("Bot settings save error:", await res.text()); return false }
+    return true
+  } catch (e) { console.error("Bot settings save error:", e); return false }
+}
+
+async function getScheduledChannels(kind) {
+  const field = kind === "morning" ? "morning_channel_id" : "random_channel_id"
+  const channels = []
+  for (const guild of client.guilds.cache.values()) {
+    const settings = await getBotSettings(guild.id)
+    const channelId = settings?.[field]
+    if (!channelId) continue
+    try {
+      const channel = await client.channels.fetch(channelId)
+      if (channel?.isTextBased?.() && channel.permissionsFor(guild.members.me)?.has("SendMessages")) channels.push(channel)
+    } catch (e) { console.error(`${kind} channel ${channelId} unavailable:`, e.message || e) }
+  }
+  if (!channels.length) {
+    const fallbackIds = kind === "morning" ? ZETA_CONFIG.morningChannelIds : ZETA_CONFIG.randomChannelIds
+    return await getConfiguredTextChannels(fallbackIds)
+  }
+  return channels
+}
 
 async function saveQuote(guildId, text, author, savedBy) {
   try {
@@ -578,6 +782,7 @@ function formatAfkDuration(since) {
 
 
 async function callMistral(systemPrompt, historyArr, retries = 2) {
+  systemPrompt = `Always respond in English only unless the task is explicitly translating quoted text.\n\n${systemPrompt}`
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
@@ -665,11 +870,9 @@ const lastMessageTime = new Map()
 
 async function sendRandomMessage() {
   try {
-    const guilds = client.guilds.cache.values()
-    for (const guild of guilds) {
-      const channels = guild.channels.cache.filter(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has("SendMessages"))
-      if (channels.size === 0) continue
-      const channel = channels.random()
+    const channels = await getScheduledChannels("random")
+    if (!channels.length) return
+    for (const channel of channels.sort(() => Math.random() - 0.5)) {
       const lastActive = lastMessageTime.get(channel.id) || 0
       if (Date.now() - lastActive < 2 * 60 * 1000) continue
       const text = await callMistral(RANDOM_STARTER_PROMPT, [{ role: "user", content: "send a random message" }])
@@ -678,7 +881,6 @@ async function sendRandomMessage() {
     }
   } catch (e) { console.error("Random message error:", e) }
 }
-
 
 async function maybeReactToChisa(msg) {
   if (Math.random() > 0.4) return
@@ -741,6 +943,9 @@ client.once(Events.ClientReady, async c => {
     new SlashCommandBuilder().setName("buy").setDescription("buy an RPG item").addStringOption(o => o.setName("item").setDescription("item id").setRequired(true).addChoices({ name: "Potion", value: "potion" }, { name: "Lucky Charm", value: "charm" })),
     new SlashCommandBuilder().setName("givecoins").setDescription("give zeta coins to another user").addUserOption(o => o.setName("user").setDescription("who gets coins").setRequired(true)).addIntegerOption(o => o.setName("amount").setDescription("how many coins").setRequired(true)),
     new SlashCommandBuilder().setName("gamelb").setDescription("global zeta game leaderboard"),
+    new SlashCommandBuilder().setName("setrandomchannel").setDescription("set this channel for Zeta random messages"),
+    new SlashCommandBuilder().setName("setmorningchannel").setDescription("set this channel for Zeta 7AM greetings"),
+    new SlashCommandBuilder().setName("schedulechannels").setDescription("show configured Zeta schedule channels"),
     new SlashCommandBuilder().setName("diary").setDescription("zeta writes a dramatic diary entry about the server today"),
   ].map(c => c.toJSON())
 
@@ -761,22 +966,19 @@ client.once(Events.ClientReady, async c => {
     const now = new Date()
     const wib = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Jakarta" }))
     const next7 = new Date(wib)
-    next7.setHours(7, 0, 0, 0)
+    next7.setHours(ZETA_CONFIG.morningHourWib, ZETA_CONFIG.morningMinuteWib, 0, 0)
     if (wib >= next7) next7.setDate(next7.getDate() + 1)
     const delay = next7 - wib
     setTimeout(async () => {
       try {
-        const guilds = client.guilds.cache.values()
-        for (const guild of guilds) {
-          const channels = guild.channels.cache.filter(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has("SendMessages"))
-          if (channels.size === 0) continue
-          const channel = channels.random()
+        const channels = await getScheduledChannels("morning")
+        if (!channels.length) return
+        for (const channel of channels) {
           const text = await callMistral(
             "You are Zeta, wife of Senn. Send a good morning message to the server. Casual, cute, short. Your own vibe.",
             [{ role: "user", content: "good morning" }]
           )
           if (text) await channel.send(text)
-          break
         }
       } catch (e) {}
       scheduleMorning()
@@ -889,11 +1091,9 @@ client.on(Events.MessageCreate, async msg => {
   }
 
   // track activity
-  const key = `${msg.guild?.id}_${msg.author.id}`
-  activityCount.set(key, (activityCount.get(key) || 0) + 1)
-  const count = activityCount.get(key)
-  if ([10, 50, 100, 250, 500].includes(count)) {
-    await msg.channel.send(`woah ${msgDisplayName} just hit ${count} messages in the server`)
+  const activity = await incrementChatActivity(msg, msgDisplayName)
+  if (activity?.milestone) {
+    await msg.channel.send(`woah ${msgDisplayName} just hit **${activity.milestone}** messages in this server`)
   }
 
   // zeta help
@@ -1252,22 +1452,20 @@ Answer: [letter only, e.g. C]`
 
   //lb
   if (lower === "zeta leaderboard" || lower === "zeta lb") {
-    const guildCounts = []
-    for (const [key, count] of activityCount.entries()) {
-      if (key.startsWith(msg.guild?.id)) {
-        const userId = key.spli("_")[1]
-        try {
-          const member = await msg.guild.members.fetch(userId)
-          guildCounts.push({ name: member.displayName || member.user.username, count })
-        } catch (e) {}
-      }
-    }
+    const guildCounts = await getServerActivityLeaderboard(msg.guild)
     if (!guildCounts.length) return msg.reply("no activity tracked yet!")
-    guildCounts.sort((a, b) => b.count - a.count)
-    const top = guildCounts.slice(0, 10)
     const medals = ["🥇", "🥈", "🥉"]
-    const list = top.map((u, i) => `${medals[i] || `${i + 1}.`} **${u.name}** — ${u.count} messages`).join("\n")
-    return msg.reply(`**server leaderboard**\n${list}`)
+    const list = []
+    for (let i = 0; i < guildCounts.length; i++) {
+      const row = guildCounts[i]
+      let name = row.name
+      try {
+        const member = await msg.guild.members.fetch(row.userId)
+        name = member.displayName || member.user.username
+      } catch (e) {}
+      list.push(`${medals[i] || `${i + 1}.`} **${name}** — ${row.count} messages`)
+    }
+    return msg.reply(`**server leaderboard**\n${list.join("\n")}`)
   }
 
   if (!mentioned && !(isOwner && Math.random() < 0.6)) return
@@ -1343,6 +1541,26 @@ return interaction.editReply(`**zeta commands** 🤍
 \`/forget [keyword]\` — make me forget something`)
   }
 
+  if (commandName === "setrandomchannel") {
+    if (!guild) return interaction.editReply("this only works in a server")
+    const ok = await saveBotSettings(guild.id, { random_channel_id: channel.id })
+    return interaction.editReply(ok ? `random messages will go to <#${channel.id}> now` : "could not save that channel. check database settings")
+  }
+
+  if (commandName === "setmorningchannel") {
+    if (!guild) return interaction.editReply("this only works in a server")
+    const ok = await saveBotSettings(guild.id, { morning_channel_id: channel.id })
+    return interaction.editReply(ok ? `7AM greetings will go to <#${channel.id}> now` : "could not save that channel. check database settings")
+  }
+
+  if (commandName === "schedulechannels") {
+    if (!guild) return interaction.editReply("this only works in a server")
+    const settings = await getBotSettings(guild.id)
+    const randomChannel = settings?.random_channel_id ? `<#${settings.random_channel_id}>` : "not set"
+    const morningChannel = settings?.morning_channel_id ? `<#${settings.morning_channel_id}>` : "not set"
+    return interaction.editReply(`random messages: ${randomChannel}\n7AM greetings: ${morningChannel}`)
+  }
+
   if (commandName === "trivia") {
     const categories = ["science", "history", "geography", "pop culture", "anime", "gaming", "food", "sports", "technology", "movies", "music", "nature", "mathematics", "literature", "mythology"]
     const randomCategory = categories[Math.floor(Math.random() * categories.length)]
@@ -1374,18 +1592,20 @@ return interaction.editReply(`**zeta commands** 🤍
   }
 
   if (commandName === "leaderboard" || commandName === "lb") {
-    const guildCounts = []
-    for (const [key, count] of activityCount.entries()) {
-      if (key.startsWith(guild?.id)) {
-        const userId = key.split("_")[1]
-        try { const m = await guild.members.fetch(userId); guildCounts.push({ name: m.displayName || m.user.username, count }) } catch (e) {}
-      }
-    }
+    const guildCounts = await getServerActivityLeaderboard(guild)
     if (!guildCounts.length) return interaction.editReply("no activity tracked yet!")
-    guildCounts.sort((a, b) => b.count - a.count)
     const medals = ["🥇", "🥈", "🥉"]
-    const list = guildCounts.slice(0, 10).map((u, i) => `${medals[i] || `${i + 1}.`} **${u.name}** — ${u.count} messages`).join("\n")
-    return interaction.editReply(`**server leaderboard**\n${list}`)
+    const list = []
+    for (let i = 0; i < guildCounts.length; i++) {
+      const row = guildCounts[i]
+      let name = row.name
+      try {
+        const m = await guild.members.fetch(row.userId)
+        name = m.displayName || m.user.username
+      } catch (e) {}
+      list.push(`${medals[i] || `${i + 1}.`} **${name}** — ${row.count} messages`)
+    }
+    return interaction.editReply(`**server leaderboard**\n${list.join("\n")}`)
   }
 
   if (commandName === "moodcheck") {

@@ -16,5 +16,8 @@
   },
   "overrides": {
     "undici": "^6.27.0"
+  },
+  "devDependencies": {
+    "@flydotio/dockerfile": "^0.7.10"
   }
 }
